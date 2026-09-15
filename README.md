@@ -34,6 +34,7 @@ side. `agentbound` scans the *framework* side, which no general tool does today.
 | `tool-reserved-name-shadowing` | high | a reserved-name set omits a framework-owned tool the framework registers (`def <name>(`) |
 | `confirmation-gate-fails-open` | high | `inspect.signature(predicate)` filters tool args, so a generic predicate returns `False` and the gate opens |
 | `ci-agent-missing-author-association` | critical | an `issues`-triggered dispatch arm with no `author_association` check (used elsewhere in the workflow) |
+| `tool-dict-last-wins` | medium | a tool-name→tool dict assigned unconditionally while duplicates are only `logging.warning`-ed (last-wins shadowing) |
 
 Each rule generalises one real, disclosed finding (documented in the rule
 docstrings).

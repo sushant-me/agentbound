@@ -163,6 +163,46 @@ _ISSUES_EVENT_RE = re.compile(
 )
 
 
+_TOOL_DICT_ASSIGN_RE = re.compile(
+    r"(?:self\.)?(?P<dict>[A-Za-z_]\w*)\s*\[\s*(?P<key>[^\]]+?)\s*\]\s*=\s*"
+)
+_DUP_WARN_RE = re.compile(
+    r"(?:logging|logger|self\._?logger)\.warning\(\s*[\"']([^\"']*[Dd]uplicate[^\"']*)[\"']"
+)
+
+
+def rule_tool_dict_last_wins(path: str, text: str) -> list[Finding]:
+    """FILE rule — generalises the last-wins overwrite in adk-python llm_request.py.
+
+    A tool-name -> tool dict is assigned unconditionally (`tools_dict[name] =
+    tool`) while a duplicate is only reported with `logging.warning`, so a later
+    tool silently shadows an earlier one of the same name (last-wins).
+    """
+    findings: list[Finding] = []
+    if not path.endswith(".py"):
+        return findings
+    if not _DUP_WARN_RE.search(text):
+        return findings
+    for m in _TOOL_DICT_ASSIGN_RE.finditer(text):
+        if "tool" not in m.group("dict").lower():
+            continue
+        line = text.count("\n", 0, m.start()) + 1
+        findings.append(
+            Finding(
+                rule="tool-dict-last-wins",
+                severity="medium",
+                path=path,
+                line=line,
+                message=(
+                    f"tool dict '{m.group('dict')}' assigned unconditionally on "
+                    f"a name key; duplicates are only logged (logging.warning), "
+                    "so a later tool silently shadows an earlier one (last-wins)"
+                ),
+            )
+        )
+    return findings
+
+
 def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Finding]:
     """FILE rule — generalises GoogleCloudPlatform/vertex-ai-creative-studio.
 
@@ -203,6 +243,7 @@ def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Findi
 FILE_RULES = [
     rule_confirmation_gate_fails_open,
     rule_ci_agent_missing_author_association,
+    rule_tool_dict_last_wins,
 ]
 
 PROJECT_RULES = [

@@ -4,6 +4,7 @@ from agentbound.rules import (
     rule_tool_reserved_name_shadowing,
     rule_confirmation_gate_fails_open,
     rule_ci_agent_missing_author_association,
+    rule_tool_dict_last_wins,
 )
 
 # --- rule 1: reserved-name shadowing ---------------------------------------
@@ -100,3 +101,29 @@ def test_ci_dispatch_clean_when_author_association_added():
         "gemini-dispatch.yml", GEMINI_DISPATCH_FIXED
     )
     assert findings == []
+
+
+# --- rule 4: tool-dict last-wins --------------------------------------------
+
+LLM_REQUEST_LAST_WINS = '''\
+def add_tool(self, tool):
+    if tool.name in self.tools_dict:
+        logging.warning(
+            "Duplicate tool name %r: the previously registered tool is"
+            " shadowed and can no longer be called.",
+            tool.name,
+        )
+    self.tools_dict[tool.name] = tool
+'''
+
+
+def test_tool_dict_last_wins_detected():
+    findings = rule_tool_dict_last_wins("llm_request.py", LLM_REQUEST_LAST_WINS)
+    assert any(f.rule == "tool-dict-last-wins" for f in findings)
+
+
+def test_tool_dict_last_wins_clean_without_duplicate_warning():
+    clean = LLM_REQUEST_LAST_WINS.replace('logging.warning(\n            "Duplicate', 'logging.info(\n            "Registered')
+    findings = rule_tool_dict_last_wins("llm_request.py", clean)
+    assert findings == []
+
