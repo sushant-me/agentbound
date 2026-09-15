@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentbound"
+version = "0.1.0"
+description = "Static detector for AI-agent tool-boundary bugs (tool shadowing, reserved-name collisions, fail-open confirmation gates, unauthenticated agent CI dispatch)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[project.scripts]
+agentbound = "agentbound.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agentbound*"]

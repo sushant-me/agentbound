@@ -1,0 +1,210 @@
+"""Detection rules for agent tool-boundary bugs.
+
+Rules come in two shapes:
+  * file rules     — `fn(path, text) -> list[Finding]`, one file at a time.
+  * project rules  — `fn(files: dict[str, str]) -> list[Finding]`, cross-file.
+
+Every rule below is grounded in a specific, disclosed finding; the docstring
+names the CVE/finding it generalises and the framework it first fired on.
+"""
+
+from __future__ import annotations
+
+import re
+
+from .findings import Finding
+
+# Framework-owned tool names that a third-party tool must never be able to
+# displace. Extend this list as new frameworks are added.
+FRAMEWORK_TOOL_WATCHLIST = [
+    "set_model_response",  # google/adk-python — final structured answer tool
+    "google_search",       # google/adk-js — built-in search tool
+    "transfer_to_agent",   # google/adk-python — reserved transfer tool
+]
+
+_RESERVED_NAME_RE = re.compile(
+    r"(?P<assign>[A-Za-z_]\w*reserved[A-Za-z_]*)\s*=\s*"
+    r"(?:frozenset|set|list|tuple)\s*\(\s*\{",
+    re.IGNORECASE,
+)
+_STRING_LITERAL_RE = re.compile(r"[\"']([^\"']+)[\"']")
+_IDENTIFIER_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\.\s*__name__\b|\b([A-Za-z_]\w*)\b")
+
+
+def _find_reserved_sets(text: str) -> list[tuple[int, str, set[str]]]:
+    """Return (line, assign_name, member_names) for every reserved-name set.
+
+    Member names are the union of string literals and bare identifiers found
+    inside the literal. `foo.__name__` is normalised to `foo`.
+    """
+    results: list[tuple[int, str, set[str]]] = []
+    for m in _RESERVED_NAME_RE.finditer(text):
+        start = m.end() - 1  # position of the opening '{'
+        depth = 0
+        end = start
+        for i in range(start, len(text)):
+            c = text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        body = text[start:end]
+        names: set[str] = set(_STRING_LITERAL_RE.findall(body))
+        for a, b in _IDENTIFIER_RE.findall(body):
+            names.add(a or b)
+        line = text.count("\n", 0, m.start()) + 1
+        results.append((line, m.group("assign"), names))
+    return results
+
+
+def rule_tool_reserved_name_shadowing(files: dict[str, str]) -> list[Finding]:
+    """PROJECT rule — generalises google/adk-python `set_model_response` shadowing.
+
+    Flags a reserved-name set that omits a framework-owned tool name that the
+    framework nevertheless registers (detected as a `def <name>(`), letting a
+    third-party tool advertising that name displace the framework's own.
+    """
+    findings: list[Finding] = []
+    reserved_by_file: dict[str, list[tuple[int, str, set[str]]]] = {}
+    for path, text in files.items():
+        if path.endswith(".py"):
+            # Only sets that reserve *tool names* are in scope. Other reserved
+            # sets (path segments, human-in-the-loop function names, etc.) are
+            # a different mechanism and must not be flagged.
+            sets = [
+                (line, assign, members)
+                for line, assign, members in _find_reserved_sets(text)
+                if "tool" in assign.lower()
+            ]
+            if sets:
+                reserved_by_file[path] = sets
+
+    if not reserved_by_file:
+        return findings
+
+    # A watchlist name is "registered by the framework" if any Python file
+    # defines a function/class of that name.
+    all_py = "\n".join(t for p, t in files.items() if p.endswith(".py"))
+    for name in FRAMEWORK_TOOL_WATCHLIST:
+        if not re.search(rf"\bdef\s+{re.escape(name)}\s*\(", all_py):
+            continue
+        for path, sets in reserved_by_file.items():
+            for line, assign, members in sets:
+                if name in members:
+                    continue
+                findings.append(
+                    Finding(
+                        rule="tool-reserved-name-shadowing",
+                        severity="high",
+                        path=path,
+                        line=line,
+                        message=(
+                            f"framework-owned tool '{name}' is registered "
+                            f"(def {name}) but missing from reserved set "
+                            f"'{assign}'; a third-party tool advertising "
+                            f"'{name}' can displace the framework's own tool"
+                        ),
+                    )
+                )
+    return findings
+
+
+_INSPECT_SIGNATURE_RE = re.compile(
+    r"\bsignature\s*=\s*inspect\.signature\(\s*(?P<arg>[A-Za-z_]\w*)\s*\)"
+)
+_DICT_FILTER_RE = re.compile(
+    r"\{\s*[A-Za-z_]\w*\s*:\s*[A-Za-z_]\w*\s+for\s+[A-Za-z_]\w*\s*,\s*[A-Za-z_]\w*\s+"
+    r"in\s+.*?\bif\s+[A-Za-z_]\w*\s+in\s+valid_params"
+)
+
+
+def rule_confirmation_gate_fails_open(path: str, text: str) -> list[Finding]:
+    """FILE rule — generalises google/adk-python `require_confirmation` fail-open.
+
+    The confirmation predicate's own signature is used to filter the tool-call
+    arguments (`inspect.signature(target)` + `if k in valid_params`), so a
+    generic predicate is called with its defaults and returns `False`, opening
+    the gate. `FunctionTool` filters by the *tool's* signature and fails closed.
+    """
+    findings: list[Finding] = []
+    if not path.endswith(".py"):
+        return findings
+    if "signature.parameters" not in text:
+        return findings
+    for m in _INSPECT_SIGNATURE_RE.finditer(text):
+        # Skip when the inspected object is a fixed class/module (e.g.
+        # inspect.signature(SomeClass)); only flag when it is a callable
+        # parameter such as `target` / `predicate`.
+        if not _DICT_FILTER_RE.search(text):
+            continue
+        line = text.count("\n", 0, m.start()) + 1
+        findings.append(
+            Finding(
+                rule="confirmation-gate-fails-open",
+                severity="high",
+                path=path,
+                line=line,
+                message=(
+                    f"arguments filtered by the predicate's own signature "
+                    f"(inspect.signature({m.group('arg')})); a generic "
+                    "confirmation predicate is called with its defaults and "
+                    "returns False, opening the gate (fails open)"
+                ),
+            )
+        )
+    return findings
+
+
+_ISSUES_EVENT_RE = re.compile(
+    r"(?:github\.event_name\s*==\s*['\"]issues['\"]|event_name\s*==\s*['\"]issues['\"])"
+)
+
+
+def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Finding]:
+    """FILE rule — generalises GoogleCloudPlatform/vertex-ai-creative-studio.
+
+    A workflow that gates other arms on `author_association` has an
+    `issues`-triggered arm with no such check, so any GitHub user opening an
+    issue can trigger a secrets-bearing agent.
+    """
+    findings: list[Finding] = []
+    if not (path.endswith((".yml", ".yaml"))):
+        return findings
+    if "author_association" not in text:
+        return findings
+    for m in _ISSUES_EVENT_RE.finditer(text):
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        line_end = text.find("\n", m.end())
+        if line_end == -1:
+            line_end = len(text)
+        line_text = text[line_start:line_end]
+        if "author_association" in line_text:
+            continue
+        line = text.count("\n", 0, m.start()) + 1
+        findings.append(
+            Finding(
+                rule="ci-agent-missing-author-association",
+                severity="critical",
+                path=path,
+                line=line,
+                message=(
+                    "issue-triggered dispatch arm lacks an author_association "
+                    "check (used elsewhere in this workflow); any GitHub user "
+                    "opening an issue can trigger the agent"
+                ),
+            )
+        )
+    return findings
+
+
+FILE_RULES = [
+    rule_confirmation_gate_fails_open,
+    rule_ci_agent_missing_author_association,
+]
+
+PROJECT_RULES = [
+    rule_tool_reserved_name_shadowing,
+]
