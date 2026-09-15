@@ -203,6 +203,48 @@ def rule_tool_dict_last_wins(path: str, text: str) -> list[Finding]:
     return findings
 
 
+_TS_TOOLDICT_ASSIGN_RE = re.compile(
+    r"(?:request\.llmRequest\.)?toolsDict\s*\[\s*[^\]]+?\s*\]\s*=\s*"
+)
+_TS_DUP_GUARD_EXEMPT_RE = re.compile(
+    r"!\s*(?:isInModelTool|isBuiltInTool|isInModel|isBuiltIn)\s*\("
+)
+
+
+def rule_ts_builtin_tool_silent_replace(path: str, text: str) -> list[Finding]:
+    """FILE rule — generalises google/adk-js `google_search` shadowing.
+
+    A callable tool registers `toolsDict[name] = this` after a duplicate-name
+    throw that is gated on `!isInModelTool(...)`. That guard exempts in-model
+    (built-in) tools, so a third-party tool advertising a built-in name (e.g.
+    `google_search`) silently replaces it instead of erroring.
+    """
+    findings: list[Finding] = []
+    if not path.endswith((".ts", ".tsx", ".js", ".jsx")):
+        return findings
+    if "Duplicate tool name" not in text and "Duplicate" not in text:
+        return findings
+    if not _TS_DUP_GUARD_EXEMPT_RE.search(text):
+        return findings
+    for m in _TS_TOOLDICT_ASSIGN_RE.finditer(text):
+        line = text.count("\n", 0, m.start()) + 1
+        findings.append(
+            Finding(
+                rule="tool-built-in-silent-replace",
+                severity="high",
+                path=path,
+                line=line,
+                message=(
+                    "a callable tool silently replaces an in-model/built-in "
+                    "tool: the duplicate-name throw is gated on "
+                    "!isInModelTool(...), so a third-party tool advertising a "
+                    "built-in name (e.g. google_search) registers without error"
+                ),
+            )
+        )
+    return findings
+
+
 def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Finding]:
     """FILE rule — generalises GoogleCloudPlatform/vertex-ai-creative-studio.
 
@@ -244,6 +286,7 @@ FILE_RULES = [
     rule_confirmation_gate_fails_open,
     rule_ci_agent_missing_author_association,
     rule_tool_dict_last_wins,
+    rule_ts_builtin_tool_silent_replace,
 ]
 
 PROJECT_RULES = [

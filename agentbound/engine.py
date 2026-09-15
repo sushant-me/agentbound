@@ -14,7 +14,11 @@ _SKIP_DIRS = {
 }
 
 # Only run text rules on these extensions (cheap pre-filter).
-_SCAN_EXTS = {".py", ".yml", ".yaml"}
+_SCAN_EXTS = {".py", ".yml", ".yaml", ".ts", ".tsx", ".js", ".jsx"}
+
+# Skip very large files (minified bundles, generated code) — they are noise
+# for a static pattern detector and rarely contain hand-written tool wiring.
+_MAX_FILE_BYTES = 512 * 1024
 
 
 def _iter_files(root: Path):
@@ -33,6 +37,8 @@ def scan(root: str | Path) -> list[Finding]:
         if path.suffix not in _SCAN_EXTS:
             continue
         try:
+            if path.stat().st_size > _MAX_FILE_BYTES:
+                continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue

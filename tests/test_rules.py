@@ -5,6 +5,7 @@ from agentbound.rules import (
     rule_confirmation_gate_fails_open,
     rule_ci_agent_missing_author_association,
     rule_tool_dict_last_wins,
+    rule_ts_builtin_tool_silent_replace,
 )
 
 # --- rule 1: reserved-name shadowing ---------------------------------------
@@ -126,4 +127,34 @@ def test_tool_dict_last_wins_clean_without_duplicate_warning():
     clean = LLM_REQUEST_LAST_WINS.replace('logging.warning(\n            "Duplicate', 'logging.info(\n            "Registered')
     findings = rule_tool_dict_last_wins("llm_request.py", clean)
     assert findings == []
+
+
+# --- rule 5: TS built-in tool silent replace --------------------------------
+
+BASE_TOOL_TS = '''\
+async processLlmRequest({llmRequest}: ToolProcessLlmRequest): Promise<void> {
+    const registered = Object.hasOwn(llmRequest.toolsDict, this.name)
+      ? llmRequest.toolsDict[this.name]
+      : undefined;
+    if (registered && !isInModelTool(registered)) {
+      throw new Error(`Duplicate tool name: ${this.name}`);
+    }
+    llmRequest.toolsDict[this.name] = this;
+}
+'''
+
+
+def test_ts_builtin_tool_silent_replace_detected():
+    findings = rule_ts_builtin_tool_silent_replace("base_tool.ts", BASE_TOOL_TS)
+    assert any(f.rule == "tool-built-in-silent-replace" for f in findings)
+
+
+def test_ts_builtin_tool_silent_replace_clean_when_guard_covers_inmodel():
+    fixed = BASE_TOOL_TS.replace(
+        "if (registered && !isInModelTool(registered)) {",
+        "if (registered) {",
+    )
+    findings = rule_ts_builtin_tool_silent_replace("base_tool.ts", fixed)
+    assert findings == []
+
 
