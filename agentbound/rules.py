@@ -608,12 +608,19 @@ def _job_gates_on_author_association(job_text: str) -> bool:
 # write scope stayed (a later step posts the comment) while `gh issue comment`
 # and `gh issue edit` were removed from the agent's allowlist.
 
-# `--allowedTools "..."` in a run block, or the `allowed_tools` / `allowedTools`
-# / `claude_args` inputs. Only quoted forms are read; a YAML block scalar under
-# `claude_args: |` is not matched, which leaves the agent unconstrained-looking
-# and keeps the full severity. That is the conservative direction on purpose.
+# The specific flags that restrict which tools an agent may call, and the value
+# they carry. `claude_args` is deliberately NOT a pattern on its own: it is a
+# container for arbitrary CLI flags, and `claude_args: "--model ..."` says
+# nothing about tools. Matching it made a model-selection flag read as a tool
+# restriction and dropped `anthropics/claude-code`'s own workflow - this rule's
+# origin - from high to low. The inner `--allowedTools` is found wherever it is
+# nested, so requiring the flag loses nothing.
+#
+# Only quoted forms are read; a YAML block scalar under `claude_args: |` is not
+# matched, which leaves the agent unconstrained-looking and keeps the full
+# severity. That is the conservative direction on purpose.
 _TOOL_ALLOWLIST_RE = re.compile(
-    r"(?:--allowedTools|--allowed-tools|allowed_tools|allowedTools|claude_args)"
+    r"(?:--allowedTools|--allowed-tools|allowed_tools|allowedTools)"
     r"[ \t]*[:=]?[ \t]*[\"']([^\"']{4,})[\"']",
     re.IGNORECASE,
 )

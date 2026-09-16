@@ -956,6 +956,50 @@ def test_reading_commands_do_not_count_as_write_tools():
     assert _agent_has_repo_write_tool("runs-on: ubuntu-latest") is None
 
 
+def test_claude_args_carrying_only_a_model_is_not_a_tool_allowlist():
+    """Regression: `anthropics/claude-code`, this rule's origin, sets
+    `claude_args: "--model claude-sonnet-4-5-20250929"`. That restricts the model,
+    not the tools. Reading `claude_args` as a tool allowlist found no mutating
+    command in it and dropped the origin finding from high to low - a false
+    negative manufactured by the fix for a false positive, caught by running the
+    rule across 10 real agent workflows instead of only the one it was written
+    against."""
+    assert _agent_has_repo_write_tool(
+        'claude_args: "--model claude-sonnet-4-5-20250929"'
+    ) is None
+    # The nested flag is still found, so requiring it costs no recall.
+    assert _agent_has_repo_write_tool(
+        'claude_args: --allowedTools "Bash(gh issue view:*)"'
+    ) is False
+
+
+CLAUDE_DEDUPE_YML = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  dedupe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: ${{ github.event.issue.user.login }}
+          claude_args: "--model claude-sonnet-4-5-20250929"
+'''
+
+
+def test_origin_workflow_keeps_full_severity():
+    """The end-to-end form of the regression above."""
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "claude-dedupe-issues.yml", CLAUDE_DEDUPE_YML
+    )
+    assert [f.severity for f in findings] == ["high"]
+
+
+
 
 def test_job_splitter_finds_both_jobs_and_ignores_on_block_children():
     jobs = _iter_jobs(NNUNET_AGENT_YML)

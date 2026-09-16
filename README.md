@@ -170,6 +170,20 @@ agent has no repository-mutating command:
 | vulnerable | yes | yes | **high** |
 | hardened | yes | no | **low** |
 
+That distinction was then run across every agent workflow to hand rather than the
+one it was written for — **37 workflow files, 10 running an agent action, and
+exactly one downgrades**: the nnU-Net file that genuinely constrains its agent.
+A refinement that silences findings at scale would be a recall bug wearing a
+precision badge, and the way to tell them apart is to count.
+
+It also caught one. `anthropics/claude-code` — this rule's *origin* — sets
+`claude_args: "--model claude-sonnet-4-5-20250929"`, which restricts the model,
+not the tools. The first version of this check read `claude_args` as a tool
+allowlist, found no mutating command inside it, and dropped the origin finding
+from `high` to `low`. The fix reads only the flags that actually restrict tools.
+Version `0.1.2` shipped that defect; `0.1.3` corrects it, and
+`test_claude_args_carrying_only_a_model_is_not_a_tool_allowlist` holds it.
+
 The match is kept rather than dropped because the residual is real: a steered
 agent can still write a file that a later step posts, so an injection can
 publish content or apply a label on the issue the attacker already controls.
