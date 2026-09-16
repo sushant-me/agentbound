@@ -600,6 +600,48 @@ def _job_gates_on_author_association(job_text: str) -> bool:
     )
 
 
+# --- what the agent is actually allowed to call ------------------------------
+# A job-level `write` scope says what the *job* may do; it does not say what the
+# agent may do. An agent step that carries a tool allowlist is constrained
+# separately, and the later non-agent steps that post results inherit the job's
+# credentials regardless. nnU-Net's fix for CVE-2026-44246 is exactly this: the
+# write scope stayed (a later step posts the comment) while `gh issue comment`
+# and `gh issue edit` were removed from the agent's allowlist.
+
+# `--allowedTools "..."` in a run block, or the `allowed_tools` / `allowedTools`
+# / `claude_args` inputs. Only quoted forms are read; a YAML block scalar under
+# `claude_args: |` is not matched, which leaves the agent unconstrained-looking
+# and keeps the full severity. That is the conservative direction on purpose.
+_TOOL_ALLOWLIST_RE = re.compile(
+    r"(?:--allowedTools|--allowed-tools|allowed_tools|allowedTools|claude_args)"
+    r"[ \t]*[:=]?[ \t]*[\"']([^\"']{4,})[\"']",
+    re.IGNORECASE,
+)
+
+# Commands by which an agent could change the repository rather than describe it.
+# `gh issue view` and `gh search issues` are deliberately absent: reading is what
+# the hardened configuration still needs.
+_MUTATING_AGENT_COMMAND_RE = re.compile(
+    r"gh\s+(?:issue|pr|label|release|workflow|repo|run)\s+"
+    r"(?:comment|edit|close|reopen|merge|delete|create|add|remove|transfer|lock)"
+    r"|gh\s+api\b"
+    r"|git\s+push\b",
+    re.IGNORECASE,
+)
+
+
+def _agent_has_repo_write_tool(job_text: str) -> bool | None:
+    """Whether the agent steps' allowlists grant a repository-mutating command.
+
+    `None` means no allowlist was readable, and callers must treat that as
+    "cannot show the agent is constrained" - never as constrained.
+    """
+    allowlists = _TOOL_ALLOWLIST_RE.findall(job_text)
+    if not allowlists:
+        return None
+    return any(_MUTATING_AGENT_COMMAND_RE.search(a) for a in allowlists)
+
+
 def rule_ci_agent_write_scope_on_untrusted_trigger(
     path: str, text: str
 ) -> list[Finding]:
@@ -635,6 +677,18 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
     excluded, since an agent reading issue text with `contents: read` is the
     pattern done right. Whether a match is otherwise acceptable is still a
     human's call - a triage bot that labels issues on purpose matches too.
+
+    A fifth condition scales the severity rather than the match. A job-level
+    `write` scope says what the *job* may do, not what the *agent* may do: an
+    agent step carrying a tool allowlist is constrained separately, while the
+    later non-agent steps that post results inherit the job's token anyway. When
+    that allowlist grants no repository-mutating command, the agent cannot
+    exercise the scope and the finding is reported at `low` with the residual
+    spelled out instead of at `high`. nnU-Net's fix for CVE-2026-44246 is the
+    case: the write scope stayed because a later step posts the comment, while
+    `gh issue comment` and `gh issue edit` left the agent's allowlist. The match
+    is kept because a steered agent can still write a file that a later step
+    posts - dropping it would be indistinguishable from the rule breaking.
     """
     findings: list[Finding] = []
     if not path.endswith((".yml", ".yaml")):
@@ -656,6 +710,35 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
             # write scope is not steerable by one.
             continue
         scope = match.group("scope")
+        # A constrained agent cannot exercise the scope itself. That is not the
+        # absence of a finding - a steered agent can still write a file a later
+        # step posts - so it is reported at the severity the residual deserves
+        # rather than dropped, which is the one thing that would make this
+        # indistinguishable from a rule that had stopped working.
+        if job is not None and _agent_has_repo_write_tool(job[3]) is False:
+            findings.append(
+                Finding(
+                    rule="ci-agent-write-scope-on-untrusted-trigger",
+                    severity="low",
+                    path=path,
+                    line=line,
+                    message=(
+                        f"an AI agent action runs in a job triggered by "
+                        f"issue/comment/review events and the job grants "
+                        f"`{scope}: write`, but the agent's own tool allowlist "
+                        "grants no repository-mutating command, so the agent "
+                        "cannot exercise that scope - the grant exists for the "
+                        "workflow's later, non-agent steps. The residual is "
+                        "narrower than the grant suggests: a steered agent can "
+                        "still write a file that a later step posts, so an "
+                        "injection can publish content or apply a label on the "
+                        "issue the attacker controls. Confirm the later steps "
+                        "take their target and arguments from the event rather "
+                        "than from the agent's output."
+                    ),
+                )
+            )
+            continue
         findings.append(
             Finding(
                 rule="ci-agent-write-scope-on-untrusted-trigger",

@@ -13,6 +13,7 @@ from agentbound.rules import (
     _iter_jobs,
     _job_containing,
     _job_gates_on_author_association,
+    _agent_has_repo_write_tool,
 )
 
 # --- rule 1: reserved-name shadowing ---------------------------------------
@@ -788,6 +789,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           allowed_non_write_users: ${{ github.event.issue.user.login }}
+          claude_args: --allowedTools "Read,Write,Glob,Grep,Bash(gh issue view:*),Bash(gh search issues:*),Bash(grep:*),Bash(ls:*)"
   on-demand:
     if: |
       github.event_name == 'issue_comment' &&
@@ -881,6 +883,78 @@ def test_vulnerable_shape_is_still_detected():
             "issue-triage.yml", NNUNET_CVE_YML
         )
     )
+
+
+# --- severity tracks what the agent may actually call ------------------------
+#
+# One repository supplies both directions. nnU-Net's vulnerable revision grants
+# the agent `gh issue comment` and `gh issue edit`; the fix leaves the same
+# `issues: write` on the job - a later step posts the comment - and removes those
+# two commands from the agent's allowlist. Same write scope, different capability,
+# and the severity has to follow the capability rather than the permissions block.
+
+NNUNET_AGENT_YML_AGENT_MAY_COMMENT = NNUNET_AGENT_YML.replace(
+    '--allowedTools "Read,Write,Glob,Grep,Bash(gh issue view:*)',
+    '--allowedTools "Read,Bash(gh issue comment:*),Bash(gh issue edit:*),'
+    "Bash(gh issue view:*",
+)
+assert "gh issue comment" in NNUNET_AGENT_YML_AGENT_MAY_COMMENT
+
+
+def _auto_triage_finding(text):
+    found = [
+        f
+        for f in rule_ci_agent_write_scope_on_untrusted_trigger(
+            "issue-agent.yml", text
+        )
+        if f.line < 20
+    ]
+    assert len(found) == 1
+    return found[0]
+
+
+def test_constrained_agent_downgrades_rather_than_disappearing():
+    """The fix for CVE-2026-44246 keeps `issues: write` but strips the write
+    commands from the agent. The finding must survive as the residual - dropping
+    it would be indistinguishable from the rule having broken."""
+    finding = _auto_triage_finding(NNUNET_AGENT_YML)
+    assert finding.severity == "low"
+    assert "no repository-mutating command" in finding.message
+
+
+def test_the_same_job_is_high_when_the_agent_may_comment():
+    """The positive control: one allowlist entry restores the severity."""
+    finding = _auto_triage_finding(NNUNET_AGENT_YML_AGENT_MAY_COMMENT)
+    assert finding.severity == "high"
+
+
+NNUNET_AGENT_YML_NO_ALLOWLIST = NNUNET_AGENT_YML.replace(
+    '          claude_args: --allowedTools "Read,Write,Glob,Grep,'
+    'Bash(gh issue view:*),Bash(gh search issues:*),Bash(grep:*),Bash(ls:*)"\n',
+    "",
+)
+assert "allowedTools" not in NNUNET_AGENT_YML_NO_ALLOWLIST
+
+
+def test_unreadable_allowlist_keeps_full_severity():
+    """No allowlist means 'cannot show the agent is constrained', which is not
+    the same as 'constrained'. Assuming the safe case is how a rule goes quiet
+    on the workflows that need it."""
+    assert _auto_triage_finding(NNUNET_AGENT_YML_NO_ALLOWLIST).severity == "high"
+
+
+def test_reading_commands_do_not_count_as_write_tools():
+    """`gh issue view` and `gh search issues` are what the hardened config still
+    needs; treating them as writes would erase the distinction."""
+    assert _agent_has_repo_write_tool(
+        'claude_args: --allowedTools "Bash(gh issue view:*),Bash(gh search issues:*)"'
+    ) is False
+    assert _agent_has_repo_write_tool(
+        'claude_args: --allowedTools "Bash(gh issue comment:*)"'
+    ) is True
+    assert _agent_has_repo_write_tool('claude_args: --allowedTools "Read,Grep"') is False
+    assert _agent_has_repo_write_tool("runs-on: ubuntu-latest") is None
+
 
 
 def test_job_splitter_finds_both_jobs_and_ignores_on_block_children():
