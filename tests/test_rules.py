@@ -4,6 +4,7 @@ from agentbound.rules import (
     rule_tool_reserved_name_shadowing,
     rule_confirmation_gate_fails_open,
     rule_ci_agent_missing_author_association,
+    rule_ci_agent_untrusted_issue_content,
     rule_tool_dict_last_wins,
     rule_ts_builtin_tool_silent_replace,
     rule_go_inmodel_tool_unoccupied,
@@ -222,3 +223,141 @@ def test_ci_dispatch_message_names_the_real_risk():
     assert "prompt injection" in message
     # Must not present the association check as the only remedy.
     assert "may not be the right fix" in message
+
+
+# --- rule: untrusted issue text reaching an AI agent -------------------------
+
+AGENT_WITH_ISSUE_BODY = '''\
+name: triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: |
+            Issue title: ${{ github.event.issue.title }}
+            Issue body: ${{ github.event.issue.body }}
+'''
+
+AGENT_FETCHING_ISSUES = '''\
+name: scheduled triage
+on:
+  schedule:
+    - cron: '0 * * * *'
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh issue list --repo "$REPO" --search "is:issue is:open" --json number,title,body > issues.json
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: |
+            Read issues.json
+'''
+
+NO_AGENT_ACTION = '''\
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh issue list --json number,title,body > issues.json
+'''
+
+AGENT_WITHOUT_ISSUE_TEXT = '''\
+name: docs audit
+on:
+  schedule:
+    - cron: '0 0 * * MON'
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: Audit the documentation in this repository.
+'''
+
+AGENT_WITH_LOGINS_ONLY = '''\
+name: community report
+on:
+  schedule:
+    - cron: '0 12 * * 1'
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh search issues --repo "$REPO" --json author,isPullRequest --limit 1000 > items.json
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: Summarise the report.
+'''
+
+
+def test_untrusted_issue_rule_fires_on_event_payload():
+    findings = rule_ci_agent_untrusted_issue_content("triage.yml", AGENT_WITH_ISSUE_BODY)
+    assert any(f.rule == "ci-agent-untrusted-issue-content" for f in findings)
+
+
+def test_untrusted_issue_rule_fires_on_fetched_issues_without_any_trigger():
+    """The scheduled case has no trigger to gate - it must still be reported."""
+    findings = rule_ci_agent_untrusted_issue_content("sched.yml", AGENT_FETCHING_ISSUES)
+    assert any(f.rule == "ci-agent-untrusted-issue-content" for f in findings)
+    assert all("untrusted" in f.message for f in findings)
+
+
+def test_untrusted_issue_rule_needs_an_agent_action():
+    assert rule_ci_agent_untrusted_issue_content("ci.yml", NO_AGENT_ACTION) == []
+
+
+def test_untrusted_issue_rule_ignores_trusted_sources():
+    assert rule_ci_agent_untrusted_issue_content("docs.yml", AGENT_WITHOUT_ISSUE_TEXT) == []
+
+
+def test_untrusted_issue_rule_ignores_login_only_aggregation():
+    """Usernames are [A-Za-z0-9-]; they cannot carry an instruction."""
+    assert rule_ci_agent_untrusted_issue_content("report.yml", AGENT_WITH_LOGINS_ONLY) == []
+
+
+def test_untrusted_issue_rule_ignores_non_workflow_files():
+    assert rule_ci_agent_untrusted_issue_content("main.py", AGENT_WITH_ISSUE_BODY) == []
+
+
+SCHEDULE_ONLY_WITH_STALE_EVENT_REF = '''\
+name: scheduled dedup
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+jobs:
+  dedup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        env:
+          ISSUE_BODY: '${{ github.event.issue.body }}'
+        with:
+          prompt: Deduplicate the issues.
+'''
+
+
+def test_ignores_event_payload_when_the_trigger_cannot_populate_it():
+    """A schedule-only workflow never receives github.event.issue, so a leftover
+    reference to it is not an input path - flagging it would be a false positive."""
+    assert (
+        rule_ci_agent_untrusted_issue_content(
+            "sched.yml", SCHEDULE_ONLY_WITH_STALE_EVENT_REF
+        )
+        == []
+    )
+
+
+def test_fetched_issues_still_fire_on_a_schedule_only_workflow():
+    """Unlike the event payload, `gh issue list` really does return content."""
+    findings = rule_ci_agent_untrusted_issue_content("sched.yml", AGENT_FETCHING_ISSUES)
+    assert findings, "fetched issue text must still be reported"

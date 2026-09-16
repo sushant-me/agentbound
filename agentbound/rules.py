@@ -369,9 +369,145 @@ def rule_java_inmodel_tool_unoccupied(path: str, text: str) -> list[Finding]:
     return findings
 
 
+# --- CI: untrusted issue text reaching an AI agent ---------------------------
+#
+# The trigger is not the control. A job that *fetches* issue content - a cron
+# running `gh issue list --json ...body`, or a step reading
+# `github.event.issue.body` - handles text written by anyone whether or not any
+# trigger arm is gated. The author_association rule above keys on triggers and
+# therefore misses the scheduled variant entirely; this one keys on the flow.
+
+_AI_AGENT_ACTION_RE = re.compile(
+    r"uses:\s*[\"']?(?:"
+    r"google-github-actions/run-gemini-cli"
+    r"|anthropics/claude-code-action"
+    r"|anthropics/claude-code-base-action"
+    r"|openai/codex-action"
+    r"|google-gemini/gemini-cli-action"
+    r")",
+    re.IGNORECASE,
+)
+
+# (label, pattern, requires_event). `requires_event` names the trigger that has
+# to be present for the payload to exist at all: on a `schedule`-only workflow
+# `github.event.issue` is empty, so flagging it would be a false positive.
+_UNTRUSTED_ISSUE_INPUTS: list[tuple[str, re.Pattern[str], str | None]] = [
+    (
+        "the issue body from the event payload",
+        re.compile(r"github\.event\.issue\.body"),
+        "issues",
+    ),
+    (
+        "comment text from the event payload",
+        re.compile(r"github\.event\.comment\.body"),
+        "issue_comment",
+    ),
+    (
+        "issue text fetched with `gh issue list --json ...body`",
+        re.compile(r"gh\s+issue\s+list[^\n]*--json[^\n]*\bbody\b"),
+        None,
+    ),
+    (
+        "pull-request text fetched with `gh pr view --json ...body`",
+        re.compile(r"gh\s+pr\s+view[^\n]*--json[^\n]*\bbody\b"),
+        None,
+    ),
+]
+
+
+_ON_BLOCK_RE = re.compile(r"^['\"]?on['\"]?\s*:(.*)$", re.MULTILINE)
+
+
+def _workflow_triggers(text: str) -> set[str]:
+    """Event names from the workflow's `on:` block, best effort.
+
+    Handles the three shapes GitHub accepts: a scalar (`on: push`), an inline
+    list (`on: [push, issues]`), and a mapping of event -> config. Used to avoid
+    treating `github.event.issue.*` as untrusted input in a workflow whose
+    triggers never populate it, which is the whole point of not repeating the
+    mistake the author_association rule makes.
+    """
+    match = _ON_BLOCK_RE.search(text)
+    if not match:
+        return set()
+
+    inline = match.group(1).strip()
+    if inline:
+        return {part.strip().strip("'\"") for part in inline.strip("[]").split(",") if part.strip()}
+
+    # Mapping form: collect keys at the first indent level deeper than `on:`.
+    lines = text[match.end():].split("\n")
+    indent = None
+    events: set[str] = set()
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        current = len(line) - len(line.lstrip())
+        if current == 0:
+            break
+        if indent is None:
+            indent = current
+        if current < indent:
+            break
+        if current == indent:
+            key = line.strip().split(":")[0].strip().strip("'\"")
+            if key:
+                events.add(key)
+    return events
+
+
+def rule_ci_agent_untrusted_issue_content(path: str, text: str) -> list[Finding]:
+    """FILE rule.
+
+    A workflow runs an AI agent action and also consumes issue or comment text
+    written by anyone. Because the text is pulled into the job, gating the
+    trigger does not remove the exposure, so this fires on the data flow rather
+    than on `author_association`.
+    """
+    findings: list[Finding] = []
+    if not path.endswith((".yml", ".yaml")):
+        return findings
+    if not _AI_AGENT_ACTION_RE.search(text):
+        return findings
+
+    triggers = _workflow_triggers(text)
+
+    seen: set[tuple[int, str]] = set()
+    for label, pattern, requires_event in _UNTRUSTED_ISSUE_INPUTS:
+        if requires_event is not None and requires_event not in triggers:
+            # The expression is present but this workflow never fires on the
+            # event that populates it, so it is not an input path.
+            continue
+        for match in pattern.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            if (line, label) in seen:
+                continue
+            seen.add((line, label))
+            findings.append(
+                Finding(
+                    rule="ci-agent-untrusted-issue-content",
+                    severity="high",
+                    path=path,
+                    line=line,
+                    message=(
+                        f"an AI agent action runs in a job that consumes {label}. "
+                        "Issue and comment text is written by anyone, so treat it "
+                        "as untrusted input; gating the trigger does not help when "
+                        "the job fetches the content itself. Harden the agent "
+                        "instead - do not enable trust-workspace mode for "
+                        "untrusted data, minimise token permissions and tools, "
+                        "avoid long-lived credentials, and keep the text out of "
+                        "the instruction channel."
+                    ),
+                )
+            )
+    return findings
+
+
 FILE_RULES = [
     rule_confirmation_gate_fails_open,
     rule_ci_agent_missing_author_association,
+    rule_ci_agent_untrusted_issue_content,
     rule_tool_dict_last_wins,
     rule_ts_builtin_tool_silent_replace,
     rule_go_inmodel_tool_unoccupied,
