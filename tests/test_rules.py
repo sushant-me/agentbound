@@ -208,3 +208,17 @@ def test_java_clean_when_appendtools_used():
     clean = JAVA_GOOGLE_SEARCH.replace("return Completable.complete();",
                                        "llmRequestBuilder.appendTools(ImmutableList.of(this));\n    return Completable.complete();")
     assert rule_java_inmodel_tool_unoccupied("GoogleSearchTool.java", clean) == []
+
+
+def test_ci_dispatch_message_names_the_real_risk():
+    """The advice must fit the arm: for a public trigger, the risk is untrusted
+    input reaching a privileged agent, not a missing authorisation check."""
+    findings = rule_ci_agent_missing_author_association(
+        "gemini-dispatch.yml", GEMINI_DISPATCH_YML
+    )
+    assert findings, "expected the public arm to still be reported"
+    message = findings[0].message
+    assert "attacker-controlled" in message
+    assert "prompt injection" in message
+    # Must not present the association check as the only remedy.
+    assert "may not be the right fix" in message

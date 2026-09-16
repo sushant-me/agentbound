@@ -250,7 +250,15 @@ def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Findi
 
     A workflow that gates other arms on `author_association` has an
     `issues`-triggered arm with no such check, so any GitHub user opening an
-    issue can trigger a secrets-bearing agent.
+    issue reaches that job.
+
+    The check is not always the right remedy: for a triage or deduplication
+    agent, running on every new issue is the feature, and gating it on
+    `author_association` would disable it. What matters is that the triggering
+    text is attacker-controlled, so if the job hands it to an agent that holds
+    secrets or an OIDC token, the exposure is indirect prompt injection rather
+    than an authorisation gap. The message says that instead of prescribing the
+    check, which in this arm would often be wrong.
     """
     findings: list[Finding] = []
     if not (path.endswith((".yml", ".yaml"))):
@@ -273,9 +281,14 @@ def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Findi
                 path=path,
                 line=line,
                 message=(
-                    "issue-triggered dispatch arm lacks an author_association "
-                    "check (used elsewhere in this workflow); any GitHub user "
-                    "opening an issue can trigger the agent"
+                    "issue-triggered dispatch arm has no author_association "
+                    "check while other arms in this workflow have one, so any "
+                    "GitHub user can reach this job. If the job runs an agent, "
+                    "the issue text is attacker-controlled input (prompt "
+                    "injection) and the agent may hold secrets or an OIDC "
+                    "token. Adding the check may not be the right fix if the "
+                    "trigger is meant to be public - constrain what the agent "
+                    "can reach instead."
                 ),
             )
         )
