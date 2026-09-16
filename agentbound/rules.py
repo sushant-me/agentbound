@@ -519,6 +519,87 @@ def _untrusted_author_reaches_agent(text: str) -> bool:
     return False
 
 
+# --- job scoping -------------------------------------------------------------
+# The CI-agent rules below ask a question about "the workflow", but the unit that
+# carries a trigger, a permission grant and an `if:` gate is the **job**. A
+# workflow with two agent jobs - one public by design, one gated - answers
+# differently per job, and a file-scoped answer attributes the public job's
+# precondition to the gated one.
+#
+# Found by running the rules against nnU-Net's hardened `issue-agent.yml` (the
+# CVE-2026-44246 fix). That file has an `auto-triage` job reachable by anyone and
+# an `on-demand` job gated on commenter `author_association`; every finding that
+# landed inside the second job was wrong, because the gate it prescribes is
+# already there. The first job's findings were left alone: they are real, just
+# severe for the design.
+
+_JOBS_KEY_RE = re.compile(r"^['\"]?jobs['\"]?[ \t]*:[ \t]*$", re.MULTILINE)
+# Job IDs are the only keys at exactly two spaces under `jobs:`; a deeper key has
+# a space where the identifier must start, so this cannot match `runs-on:` at
+# four. Scanned only after the `jobs:` line, so `on:`'s two-space children
+# (`issues:`) are never mistaken for jobs.
+_JOB_KEY_RE = re.compile(r"^  ([A-Za-z0-9_-]+)[ \t]*:[ \t]*$", re.MULTILINE)
+_STEPS_KEY_RE = re.compile(r"^[ \t]+steps[ \t]*:[ \t]*$", re.MULTILINE)
+
+# `author_association` compared against the associations that imply write or
+# review trust. Both orders occur in the wild:
+#   github.event.comment.author_association == 'OWNER'
+#   contains(fromJSON('["OWNER",...]'), github.event.comment.author_association)
+_TRUST_GATE_EQ_RE = re.compile(
+    r"author_association\s*==\s*['\"]?(?:OWNER|MEMBER|COLLABORATOR)\b",
+    re.IGNORECASE,
+)
+_TRUST_GATE_CONTAINS_RE = re.compile(
+    r"contains\s*\(\s*fromJSON\s*\("
+    r"(?=[^)]*(?:OWNER|MEMBER|COLLABORATOR))[^)]*\)"
+    r"[^)]*author_association",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _iter_jobs(text: str) -> list[tuple[str, int, int, str]]:
+    """Split a workflow into `(job_id, first_line, last_line, job_text)`.
+
+    Best effort. An unparseable file yields `[]`, and callers must read "no job
+    found" as "cannot show a gate" - never as "gated".
+    """
+    key = _JOBS_KEY_RE.search(text)
+    if key is None:
+        return []
+    body = text[key.end():]
+    first_body_line = text.count("\n", 0, key.end()) + 1
+    marks = list(_JOB_KEY_RE.finditer(body))
+    jobs: list[tuple[str, int, int, str]] = []
+    for index, mark in enumerate(marks):
+        stop = marks[index + 1].start() if index + 1 < len(marks) else len(body)
+        start_line = first_body_line + body.count("\n", 0, mark.start())
+        end_line = first_body_line + body.count("\n", 0, stop) - 1
+        jobs.append((mark.group(1), start_line, end_line, body[mark.start():stop]))
+    return jobs
+
+
+def _job_containing(
+    jobs: list[tuple[str, int, int, str]], line: int
+) -> tuple[str, int, int, str] | None:
+    for job in jobs:
+        if job[1] <= line <= job[2]:
+            return job
+    return None
+
+
+def _job_gates_on_author_association(job_text: str) -> bool:
+    """Whether the job's own condition requires a trusted author association.
+
+    Only the job header is searched - everything before its `steps:` - so a gate
+    that merely appears somewhere later in a script cannot suppress a finding.
+    """
+    steps = _STEPS_KEY_RE.search(job_text)
+    header = job_text[: steps.start()] if steps else job_text
+    return bool(
+        _TRUST_GATE_EQ_RE.search(header) or _TRUST_GATE_CONTAINS_RE.search(header)
+    )
+
+
 def rule_ci_agent_write_scope_on_untrusted_trigger(
     path: str, text: str
 ) -> list[Finding]:
@@ -565,8 +646,15 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
     if not _untrusted_author_reaches_agent(text):
         return findings
 
+    jobs = _iter_jobs(text)
     for match in _WRITE_SCOPE_RE.finditer(text):
         line = text.count("\n", 0, match.start()) + 1
+        job = _job_containing(jobs, line)
+        if job is not None and _job_gates_on_author_association(job[3]):
+            # The message below prescribes "gate the job on author_association";
+            # this job already does. An untrusted author cannot reach it, so the
+            # write scope is not steerable by one.
+            continue
         scope = match.group("scope")
         findings.append(
             Finding(
@@ -646,6 +734,7 @@ def rule_ci_agent_untrusted_issue_content(path: str, text: str) -> list[Finding]
         return findings
 
     triggers = _workflow_triggers(text)
+    jobs = _iter_jobs(text)
 
     seen: set[tuple[int, str]] = set()
     for label, pattern, requires_event in _UNTRUSTED_ISSUE_INPUTS:
@@ -655,6 +744,12 @@ def rule_ci_agent_untrusted_issue_content(path: str, text: str) -> list[Finding]
             continue
         for match in pattern.finditer(text):
             line = text.count("\n", 0, match.start()) + 1
+            job = _job_containing(jobs, line)
+            if job is not None and _job_gates_on_author_association(job[3]):
+                # The text is authored by whoever triggers the job, and only a
+                # trusted association can trigger this one. The untrusted-author
+                # premise does not hold here, whatever the file does elsewhere.
+                continue
             if (line, label) in seen:
                 continue
             seen.add((line, label))

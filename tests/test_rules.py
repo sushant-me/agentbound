@@ -10,6 +10,9 @@ from agentbound.rules import (
     rule_ts_builtin_tool_silent_replace,
     rule_go_inmodel_tool_unoccupied,
     rule_java_inmodel_tool_unoccupied,
+    _iter_jobs,
+    _job_containing,
+    _job_gates_on_author_association,
 )
 
 # --- rule 1: reserved-name shadowing ---------------------------------------
@@ -752,3 +755,162 @@ def test_origin_entries_are_not_duplicated():
     recall = importlib.import_module("scripts.recall_audit")
     pairs = [(repo, fn) for repo, fn, _, _ in recall.ORIGINS]
     assert len(pairs) == len(set(pairs)), "duplicate (repo, rule) entries"
+
+
+# --- job scoping: the CVE-2026-44246 fix, nnU-Net `issue-agent.yml` ----------
+#
+# The first real-world file where the CI-agent rules were wrong in the *safe*
+# direction. nnU-Net has two agent jobs: `auto-triage` is reachable by anyone on
+# purpose, `on-demand` is gated on commenter `author_association`. The rules
+# asked "does this workflow let an untrusted author drive an agent?" and answered
+# once for the file, so the public job's precondition was attributed to the gated
+# job - and every finding landed in the one job that had already done what the
+# rule's own message prescribes.
+#
+# `auto-triage`'s own findings are deliberately NOT asserted away here. That job
+# really is reachable by anyone and really does hold `issues: write`; calling
+# that a non-finding would be trading a precision bug for a recall one.
+
+NNUNET_AGENT_YML = '''\
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+jobs:
+  auto-triage:
+    if: github.event_name == 'issues' && github.actor != 'claude[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: ${{ github.event.issue.user.login }}
+  on-demand:
+    if: |
+      github.event_name == 'issue_comment' &&
+      contains(github.event.comment.body, '@claude') &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: ${{ github.event.issue.user.login }}
+'''
+
+# The positive control: identical except the gate is gone. If the negative test
+# below cannot be made to fail by deleting the gate, it proves nothing about the
+# gate - it would pass just as well against a rule that never fires at all.
+NNUNET_AGENT_YML_UNGATED = NNUNET_AGENT_YML.replace(
+    """ &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')""",
+    "",
+)
+assert NNUNET_AGENT_YML_UNGATED != NNUNET_AGENT_YML
+assert "author_association" not in NNUNET_AGENT_YML_UNGATED
+
+
+def test_gated_agent_job_does_not_inherit_the_public_jobs_precondition():
+    """Regression: CVE-2026-44246 fix (nnU-Net). The gate the rule prescribes is
+    already present in that job, so it is not an input path."""
+    findings = rule_ci_agent_untrusted_issue_content(
+        "issue-agent.yml", NNUNET_AGENT_YML
+    )
+    assert findings == []
+
+
+def test_removing_the_gate_brings_the_same_job_back():
+    """The positive control for the test above."""
+    findings = rule_ci_agent_untrusted_issue_content(
+        "issue-agent.yml", NNUNET_AGENT_YML_UNGATED
+    )
+    assert any(f.rule == "ci-agent-untrusted-issue-content" for f in findings)
+
+
+def test_write_scope_skips_only_the_gated_job():
+    """`auto-triage` keeps its finding; `on-demand` loses one."""
+    hardened = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "issue-agent.yml", NNUNET_AGENT_YML
+    )
+    assert len(hardened) == 1
+    ungated = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "issue-agent.yml", NNUNET_AGENT_YML_UNGATED
+    )
+    assert len(ungated) == 2
+
+
+NNUNET_CVE_YML = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: ${{ github.event.issue.user.login }}
+          prompt: |
+            TITLE: ${{ github.event.issue.title }}
+            BODY: ${{ github.event.issue.body }}
+'''
+
+
+def test_vulnerable_shape_is_still_detected():
+    """Recall guard for the same file before its fix: job scoping must not have
+    bought precision by going quiet on the vulnerable version."""
+    assert any(
+        f.rule == "ci-agent-untrusted-issue-content"
+        for f in rule_ci_agent_untrusted_issue_content("issue-triage.yml", NNUNET_CVE_YML)
+    )
+    assert any(
+        f.rule == "ci-agent-write-scope-on-untrusted-trigger"
+        for f in rule_ci_agent_write_scope_on_untrusted_trigger(
+            "issue-triage.yml", NNUNET_CVE_YML
+        )
+    )
+
+
+def test_job_splitter_finds_both_jobs_and_ignores_on_block_children():
+    jobs = _iter_jobs(NNUNET_AGENT_YML)
+    assert [j[0] for j in jobs] == ["auto-triage", "on-demand"]
+    # `issues:` under `on:` sits at two spaces; it must not be read as a job.
+    assert "issues" not in {j[0] for j in jobs}
+
+
+def test_job_gate_check_handles_both_orders_and_only_the_header():
+    assert _job_gates_on_author_association(
+        "  if: github.event.issue.author_association == 'MEMBER'\n  steps:\n"
+    )
+    assert _job_gates_on_author_association(
+        "  if: contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'),"
+        " github.event.comment.author_association)\n  steps:\n"
+    )
+    # A gate that only appears inside a later script must not suppress anything.
+    assert not _job_gates_on_author_association(
+        "  if: github.event_name == 'issues'\n  steps:\n"
+        "    - run: echo \"${{ github.event.issue.author_association == 'OWNER' }}\"\n"
+    )
+    # Lower trust levels are not gates.
+    assert not _job_gates_on_author_association(
+        "  if: github.event.issue.author_association == 'CONTRIBUTOR'\n  steps:\n"
+    )
+
+
+def test_ungated_text_still_reports_no_job_rather_than_a_gate():
+    """An unparseable file must read as 'cannot show a gate', not as 'gated'."""
+    assert _iter_jobs("some: yaml\n") == []
+    assert _job_containing([], 7) is None
+
