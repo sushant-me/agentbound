@@ -495,7 +495,7 @@ def test_write_scope_rule_needs_an_agent_action():
 def test_id_token_write_is_not_a_dangerous_write_scope():
     """`id-token: write` mints the OIDC token the agent authenticates with.
 
-    It is the safe replacement for a static key and appears in hardenend
+    It is the safe replacement for a static key and appears in hardened
     configurations, so counting it would fire on exactly the setups that got it
     right.
     """
