@@ -721,3 +721,36 @@ def test_the_same_labeler_fires_once_an_agent_is_reachable():
     )
     findings = rule_ci_agent_missing_author_association("triage.yml", text)
     assert [f.rule for f in findings] == ["ci-agent-missing-author-association"]
+
+
+# --- recall: every rule must declare where it came from ---------------------
+
+def test_every_rule_has_a_declared_origin():
+    """A rule with no origin cannot be recall-audited.
+
+    Precision work found four false positives in these rules; this is the
+    opposite failure, and it is invisible without a declared expectation. The
+    origin table is what `scripts/recall_audit.py` checks against, so a rule
+    added without an entry is a rule nobody will ever test for silence.
+    """
+    import importlib
+
+    recall = importlib.import_module("scripts.recall_audit")
+    from agentbound.rules import FILE_RULES, PROJECT_RULES
+
+    declared = {fn for _, fn, _, _ in recall.ORIGINS}
+    implemented = {r.__name__ for r in list(FILE_RULES) + list(PROJECT_RULES)}
+    # `confirmation-gate-fails-open` is exempt: its origin repo is not replicated
+    # locally, so there is nothing to audit it against yet.
+    missing = implemented - declared - {"rule_confirmation_gate_fails_open"}
+    assert not missing, f"rules with no declared origin: {sorted(missing)}"
+
+
+def test_origin_entries_are_not_duplicated():
+    """Regression: the table was a dict keyed on the repo, which silently
+    dropped the second of adk-python's two rules."""
+    import importlib
+
+    recall = importlib.import_module("scripts.recall_audit")
+    pairs = [(repo, fn) for repo, fn, _, _ in recall.ORIGINS]
+    assert len(pairs) == len(set(pairs)), "duplicate (repo, rule) entries"

@@ -72,6 +72,41 @@ Unit tests (self-contained fixtures, no network):
 python -m pytest tests/
 ```
 
+## Does it still find the things it was built for?
+
+Precision is measured in the other direction from this. Every rule here was
+generalised from a real finding, so there is a second question worth asking:
+**does each rule still fire on the code it came from?** A rule that quietly
+stopped matching would be indistinguishable from a rule with a perfect
+false-positive record.
+
+`scripts/recall_audit.py` answers it against committed upstream trees:
+
+```bash
+git clone --filter=blob:none https://github.com/google/adk-python /tmp/adk-python
+python scripts/recall_audit.py /tmp/adk-python origin/main
+```
+
+It reads blobs out of git rather than the working copy, deliberately. A working
+copy may be sitting on the branch that *fixes* the thing a rule detects — which
+is exactly what happened the first time this audit was run by hand, and made a
+working rule look broken.
+
+All eight rules fire on at least one origin:
+
+| origin | rule that fires |
+|---|---|
+| `google/adk-python` | `tool-reserved-name-shadowing`, `tool-dict-last-wins`, `confirmation-gate-fails-open` |
+| `google/adk-go` | `tool-inmodel-name-unoccupied` |
+| `google/adk-java` | `tool-inmodel-name-unoccupied` |
+| `google/adk-js` | `tool-built-in-silent-replace` |
+| `google-gemini/gemini-cli` | `ci-agent-untrusted-issue-content`, `ci-agent-missing-author-association` |
+| `GoogleCloudPlatform/vertex-ai-creative-studio` | `ci-agent-missing-author-association` |
+| `anthropics/claude-code` | `ci-agent-write-scope-on-untrusted-trigger` |
+
+A test asserts every rule has a declared origin, so a new rule cannot be added
+without saying what it is supposed to find.
+
 ## Scope & honesty
 
 The rules are heuristics that surface high-signal locations and explain the
