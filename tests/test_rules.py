@@ -85,6 +85,11 @@ jobs:
       (github.event_name == 'issues' && contains(fromJSON('["opened","reopened"]'), github.event.action))
     steps:
       - uses: actions/checkout@v4
+  triage:
+    # The agent lives in the called file, as in the real dispatcher this rule
+    # generalises. Without evidence an agent is reachable, the rule stays silent
+    # by design, so the fixture has to carry this or the test proves nothing.
+    uses: ./.github/workflows/gemini-triage.yml
 '''
 
 
@@ -660,3 +665,59 @@ def test_codex_action_counts_as_gated():
         f.rule
         for f in rule_ci_agent_untrusted_issue_content("t.yml", opted_in)
     ] == ["ci-agent-untrusted-issue-content"]
+
+
+# The real workflow that produced the false positive: deer-flow's triage.yml.
+# A self-contained labeler: no agent action, no reusable call, and
+# `author_association` used to decide whether to apply a first-time-contributor
+# label. Every condition the old rule checked was satisfied and nothing was
+# wrong with it.
+LABELER_USING_AUTHOR_ASSOCIATION = '''\
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  pr-triage:
+    if: github.event_name == 'pull_request_target'
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            if (['FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER'].includes(pr.author_association)) {
+              toAdd.push('first-time-contributor')
+            }
+  issue-triage:
+    if: github.event_name == 'issues'
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['needs-triage'] })
+'''
+
+
+def test_labeler_using_author_association_is_not_reported():
+    """Regression for a critical false positive found by scanning real repos.
+
+    The old rule fired whenever `author_association` appeared anywhere in the
+    file alongside an `issues` arm. Here it appears in a `github-script` body
+    that decides whether to apply a label - no arm is gated, and no agent is
+    reachable, so there is no injection path to warn about.
+    """
+    assert (
+        rule_ci_agent_missing_author_association(
+            "triage.yml", LABELER_USING_AUTHOR_ASSOCIATION
+        )
+        == []
+    )
+
+
+def test_the_same_labeler_fires_once_an_agent_is_reachable():
+    """Not vacuous: the fix must be the agent condition, not the fixture."""
+    text = LABELER_USING_AUTHOR_ASSOCIATION.replace(
+        "  issue-triage:",
+        "  invoke:\n    uses: ./.github/workflows/agent.yml\n  issue-triage:",
+    )
+    findings = rule_ci_agent_missing_author_association("triage.yml", text)
+    assert [f.rule for f in findings] == ["ci-agent-missing-author-association"]

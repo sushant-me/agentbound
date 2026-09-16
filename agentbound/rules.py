@@ -158,6 +158,15 @@ def rule_confirmation_gate_fails_open(path: str, text: str) -> list[Finding]:
     return findings
 
 
+# A call to a reusable workflow. The agent may live in the called file, so this
+# counts as evidence one is reachable from here even when none is inlined.
+# Covers the local form (`./.github/workflows/x.yml`) and the cross-repo form
+# (`owner/repo/.github/workflows/x.yml@ref`).
+_REUSABLE_WORKFLOW_RE = re.compile(
+    r"uses:\s*['\"]?(?:\./\.github/workflows/|[\w.-]+/[\w.-]+/\.github/workflows/)",
+    re.IGNORECASE,
+)
+
 _ISSUES_EVENT_RE = re.compile(
     r"(?:github\.event_name\s*==\s*['\"]issues['\"]|event_name\s*==\s*['\"]issues['\"])"
 )
@@ -259,11 +268,32 @@ def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Findi
     secrets or an OIDC token, the exposure is indirect prompt injection rather
     than an authorisation gap. The message says that instead of prescribing the
     check, which in this arm would often be wrong.
+
+    Two conditions were added after this rule produced a critical-severity false
+    positive against a repository that only labels issues:
+
+    * The file must show that an agent is reachable from it - by running an agent
+      action, or by calling a reusable workflow that may. The origin case does
+      the latter: `gemini-dispatch.yml` runs no agent itself, it delegates to
+      `./.github/workflows/gemini-triage.yml`. Requiring the action in this file
+      would have lost the finding the rule was written for, which is why the
+      reusable call counts.
+
+    A second idea was tried and rejected: requiring `author_association` to be
+    compared against OWNER/MEMBER/COLLABORATOR, on the theory that a privilege
+    gate is distinguishable from a labelling signal. The false-positive file
+    contains that list too, in a `github-script` deciding whether to apply a
+    label, so the test does not separate the two cases. Only the condition that
+    was checked against both is implemented.
     """
     findings: list[Finding] = []
     if not (path.endswith((".yml", ".yaml"))):
         return findings
     if "author_association" not in text:
+        return findings
+    if not (
+        _AI_AGENT_ACTION_RE.search(text) or _REUSABLE_WORKFLOW_RE.search(text)
+    ):
         return findings
     for m in _ISSUES_EVENT_RE.finditer(text):
         line_start = text.rfind("\n", 0, m.start()) + 1
