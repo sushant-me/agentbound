@@ -33,8 +33,13 @@ inputs:
 outputs:
   findings:
     description: Number of findings reported, at any severity.
+    # A composite action does not re-export its step outputs automatically; the
+    # `value` is what maps them. Without these two lines the outputs exist and
+    # are always empty, which the action self-test in ci.yml caught.
+    value: ${{ steps.scan.outputs.findings }}
   exit-code:
     description: 'The scanner exit code: 1 when a finding met `fail-on`, else 0.'
+    value: ${{ steps.scan.outputs.exit-code }}
 
 runs:
   using: composite

@@ -49,21 +49,22 @@ jobs:
 
       - name: CLI contract - --fail-on raises the threshold
         # `low` and `medium` findings are reported on purpose, so a default that
-        # failed on them would make the tool unusable as a gate. This asserts
-        # both directions: the medium fixture still fails at `medium`, and stops
-        # failing at `high`.
+        # failed on them would make the tool unusable as a gate. All three
+        # directions are asserted. Written with `set +e` because GitHub runs
+        # steps under `bash -e`, where the expected non-zero exit would itself
+        # fail the step - which is how this step first went red.
         run: |
-          agentbound scan /tmp/agentbound-dirty --fail-on medium
-          if agentbound scan /tmp/agentbound-dirty --fail-on high; then
-            echo "--fail-on high correctly ignored a medium finding"
-          else
-            echo "--fail-on high did not raise the threshold"; exit 1
-          fi
-          if agentbound scan /tmp/agentbound-dirty --fail-on none; then
-            echo "--fail-on none never fails: ok"
-          else
-            echo "--fail-on none still failed"; exit 1
-          fi
+          check() {
+            agentbound scan /tmp/agentbound-dirty --fail-on "$1" >/dev/null 2>&1
+            got=$?
+            test "$got" = "$2" || { echo "--fail-on $1 exited $got, want $2"; exit 1; }
+          }
+          set +e
+          check medium 1
+          check high 0
+          check none 0
+          set -e
+          echo "threshold: medium fails, high and none pass: ok"
 
       - name: CLI contract - an unreadable input exits 2, not 0
         # The third arm of the documented contract, and the one that was never
