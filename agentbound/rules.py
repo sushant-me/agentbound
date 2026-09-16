@@ -465,6 +465,70 @@ _WRITE_SCOPE_RE = re.compile(
     r"[ \t]*:[ \t]*write[ \t]*$",
     re.MULTILINE,
 )
+_PERMISSIONS_KEY_RE = re.compile(r"^([ \t]*)permissions[ \t]*:([ \t]*)(.*)$")
+_PERMISSIONS_INLINE_RE = re.compile(
+    r"^[ \t]*permissions[ \t]*:[ \t]*\{(?P<body>[^}]*)\}"
+)
+
+
+def _iter_write_scopes(text: str) -> list[tuple[int, str]]:
+    """`(line, scope)` for each real `write` grant in the workflow.
+
+    A `scope: write` line grants something only as a child of a `permissions:`
+    **mapping**. The identical two lines appear as an action *input*:
+
+        - uses: open-security-tools/ost-simple-sts@<sha>
+          with:
+            # Linking an upstream issue to a fork branch requires both
+            # permissions on one token.
+            permissions: |
+              contents: write
+              issues: write
+
+    That is a credential broker being asked for a narrow, short-lived token -
+    the opposite of a grant on the job. Reading it as one flagged
+    `astral-sh/uv`'s `issue-triage.yml`, whose top level is `permissions: {}`
+    and whose jobs are all read-only. It is the shape of repository that can
+    least afford a false positive, because it is the one already doing the work.
+
+    Skipped: a block scalar (`|`, `>`) or any other value on the
+    `permissions:` line, a scope line shallower than its key, and a scope line
+    with no `permissions:` above it at all. The inline form
+    `permissions: {contents: write}` is handled, since missing a real grant is
+    worse than the extra branch.
+    """
+    found: list[tuple[int, str]] = []
+    perm_indent: int | None = None
+    for number, raw in enumerate(text.split("\n"), start=1):
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+
+        inline = _PERMISSIONS_INLINE_RE.match(line)
+        if inline:
+            for part in inline.group("body").split(","):
+                if _WRITE_SCOPE_RE.match(part.strip()):
+                    found.append((number, part.split(":")[0].strip()))
+            perm_indent = None
+            continue
+
+        key = _PERMISSIONS_KEY_RE.match(line)
+        if key:
+            # Only a bare `permissions:` opens a mapping of scopes. A block
+            # scalar, `{}` or any inline value opens nothing.
+            perm_indent = len(key.group(1)) if not key.group(3).strip() else None
+            continue
+
+        if perm_indent is None:
+            continue
+        if indent <= perm_indent:
+            perm_indent = None  # left the block
+            continue
+        scope = _WRITE_SCOPE_RE.match(line)
+        if scope:
+            found.append((number, scope.group("scope")))
+    return found
 
 # Agent actions, and whether each refuses a run actor without write permission.
 #
@@ -708,15 +772,13 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
         return findings
 
     jobs = _iter_jobs(text)
-    for match in _WRITE_SCOPE_RE.finditer(text):
-        line = text.count("\n", 0, match.start()) + 1
+    for line, scope in _iter_write_scopes(text):
         job = _job_containing(jobs, line)
         if job is not None and _job_gates_on_author_association(job[3]):
             # The message below prescribes "gate the job on author_association";
             # this job already does. An untrusted author cannot reach it, so the
             # write scope is not steerable by one.
             continue
-        scope = match.group("scope")
         # A constrained agent cannot exercise the scope itself. That is not the
         # absence of a finding - a steered agent can still write a file a later
         # step posts - so it is reported at the severity the residual deserves

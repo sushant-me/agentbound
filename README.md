@@ -37,7 +37,7 @@ side. `agentbound` scans the *framework* side, which no general tool does today.
 | `tool-reserved-name-shadowing` | high | a reserved-name set omits a framework-owned tool the framework registers (`def <name>(`) |
 | `confirmation-gate-fails-open` | high | `inspect.signature(predicate)` filters tool args, so a generic predicate returns `False` and the gate opens |
 | `ci-agent-untrusted-issue-content` | high | a workflow runs an AI agent action **and** consumes issue or comment text — from the event payload, or fetched with `gh issue list --json ...body`. Both CI-agent rules also require that an author *without* write access can actually reach the agent: `claude-code-action` and `codex-action` refuse such an actor unless an input opts them in, while `run-gemini-cli` and `gemini-cli-action` perform no actor check at all. The precondition is per action and read from each action's source, and is evaluated per **job**, so a job gated on `author_association` does not inherit it from a public job in the same file (see *Precision* below) |
-| `ci-agent-write-scope-on-untrusted-trigger` | high | an AI agent action runs in a job triggered by issue/comment/review events, the job grants a `write` scope, **and** an untrusted author can reach the agent. The complement of the rule above: here the untrusted text never appears in the YAML, because the agent fetches the issue itself at runtime with the token the job hands it, so no scan of the file can see it. `id-token: write` is not counted — it mints the OIDC token and is what a hardened setup uses. Evaluated per job, as above. Severity scales with the agent's tool allowlist: if it grants no repository-mutating command the grant belongs to the job's later steps, and the finding drops to `low` with the residual spelled out |
+| `ci-agent-write-scope-on-untrusted-trigger` | high | an AI agent action runs in a job triggered by issue/comment/review events, the job grants a `write` scope, **and** an untrusted author can reach the agent. The complement of the rule above: here the untrusted text never appears in the YAML, because the agent fetches the issue itself at runtime with the token the job hands it, so no scan of the file can see it. `id-token: write` is not counted — it mints the OIDC token and is what a hardened setup uses. Evaluated per job, as above. Severity scales with the agent's tool allowlist: if it grants no repository-mutating command the grant belongs to the job's later steps, and the finding drops to `low` with the residual spelled out. A `scope: write` line counts only as a child of a `permissions:` **mapping** — the same two lines appearing as an action input, as in a credential broker's `permissions: \|`, are not a grant |
 | `ci-agent-missing-author-association` | critical | an `issues`-triggered dispatch arm with no `author_association` check while other arms have one, **and** an agent is reachable from the file — either an agent action or a call to a reusable workflow that may hold one. A repository that only labels issues, with no agent anywhere, is not reported |
 | `tool-dict-last-wins` | medium | a tool-name→tool dict assigned unconditionally while duplicates are only `logging.warning`-ed (last-wins shadowing) |
 | `tool-built-in-silent-replace` | high | a callable tool registers `toolsDict[name] = this` after a duplicate throw gated on `!isInModelTool(...)`, silently displacing a built-in |
@@ -178,6 +178,34 @@ one it was written for — **37 workflow files, 10 running an agent action, and
 exactly one downgrades**: the nnU-Net file that genuinely constrains its agent.
 A refinement that silences findings at scale would be a recall bug wearing a
 precision badge, and the way to tell them apart is to count.
+
+**A wider sweep found one defect of each kind.** Searching GitHub for the opt-out
+vector — `allowed_non_write_users` and `allow-users` inside `.github/workflows` —
+and scanning the **197 workflow files from 132 repositories** that came back
+turned up two bugs in the scope matching itself, pointing opposite ways:
+
+* **A false positive.** `astral-sh/uv`'s `issue-triage.yml` was flagged on
+  `contents: write`. That line is not a GitHub permission at all: it sits inside a
+  `permissions: |` block scalar passed as an *input* to
+  `open-security-tools/ost-simple-sts`, a credential broker being asked for a
+  narrow, short-lived token. The job is read-only and the workflow's top level is
+  `permissions: {}` — a deny-all default. The rule was flagging the shape of
+  repository least able to afford it, because it is the one already doing the
+  work. A `scope: write` line now counts only as a child of a `permissions:`
+  mapping, which is the only place it grants anything.
+* **A false negative, in the other direction, present from the start.** The
+  pattern anchored on end-of-line, so `issues: write # post the triage comment` —
+  an extremely common way to write it — matched **nothing**. 23 real grants
+  across the corpus were invisible. Comments are stripped before matching now.
+
+Both guards are mutation-tested: reverting either fails exactly one test.
+
+The sweep also sizes the class, and the answer is worth stating plainly. Of 132
+repositories running an agent with the opt-out set, the great majority grant only
+`issues: write` or `pull-requests: write` and use it for what an issue-triage bot
+is for — labelling and commenting. That is deliberate configuration, not a
+vulnerability, and reporting the hundred-odd intended ones would be noise. Seven
+also grant `contents: write`, and that is where the question is worth asking.
 
 It also caught one. `anthropics/claude-code` — this rule's *origin* — sets
 `claude_args: "--model claude-sonnet-4-5-20250929"`, which restricts the model,

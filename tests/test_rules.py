@@ -14,6 +14,7 @@ from agentbound.rules import (
     _job_containing,
     _job_gates_on_author_association,
     _agent_has_repo_write_tool,
+    _iter_write_scopes,
 )
 
 # --- rule 1: reserved-name shadowing ---------------------------------------
@@ -1015,6 +1016,94 @@ def test_the_fix_commit_is_still_high_because_the_agent_can_still_comment():
     assert _agent_has_repo_write_tool(
         "claude_args: --allowedTools " + NNUNET_FIX_COMMIT_ALLOWLIST
     ) is True
+
+
+# --- which `scope: write` lines are actually grants --------------------------
+#
+# Two defects, one in each direction, found by running the rule over a 197-file
+# corpus of real agent workflows rather than the fixtures it was written for.
+
+BLOCK_SCALAR_PERMISSIONS_YML = '''\
+on:
+  issues:
+    types: [opened]
+permissions: {}
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Get issue context token
+        id: token
+        uses: open-security-tools/ost-simple-sts@974a63a2daaaa40f7c6dec40d334f3da4421469e
+        with:
+          repositories: |
+            example/repo
+          # Linking an upstream issue to a fork branch requires both
+          # permissions on one token.
+          permissions: |
+            contents: write
+            issues: write
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: ${{ github.event.issue.user.login }}
+'''
+
+
+def test_permissions_block_scalar_on_an_action_input_is_not_a_grant():
+    """Regression: `astral-sh/uv`. A credential broker is *asked* for a scoped
+    token; the job is read-only and the top level is `permissions: {}`. Flagging
+    that flags the repo already doing the work."""
+    assert _iter_write_scopes(BLOCK_SCALAR_PERMISSIONS_YML) == []
+    assert rule_ci_agent_write_scope_on_untrusted_trigger(
+        "issue-triage.yml", BLOCK_SCALAR_PERMISSIONS_YML
+    ) == []
+
+
+COMMENTED_WRITE_SCOPE_YML = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # post the triage comment
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: ${{ github.event.issue.user.login }}
+          claude_args: --allowedTools "Read,Bash(gh issue comment:*)"
+'''
+
+
+def test_a_trailing_comment_does_not_hide_a_real_grant():
+    """Regression, and the more dangerous direction: the old pattern anchored on
+    end-of-line, so `issues: write # comment` - an extremely common style -
+    matched nothing. 23 real grants across the corpus were being missed."""
+    assert _iter_write_scopes(COMMENTED_WRITE_SCOPE_YML) == [(9, "issues")]
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "triage.yml", COMMENTED_WRITE_SCOPE_YML
+    )
+    assert [f.severity for f in findings] == ["high"]
+
+
+def test_write_scope_shapes():
+    """The four forms, and the three that grant nothing."""
+    assert _iter_write_scopes("permissions:\n  issues: write\n") == [(2, "issues")]
+    assert _iter_write_scopes("permissions: {contents: write, issues: read}\n") == [
+        (1, "contents")
+    ]
+    assert _iter_write_scopes("permissions: {}\n") == []
+    assert _iter_write_scopes("permissions: read-all\n") == []
+    # A scope line that is not under a `permissions:` mapping is not a grant.
+    assert _iter_write_scopes("with:\n  contents: write\n") == []
+    # ...and one shallower than its key has left the block.
+    assert _iter_write_scopes("  permissions:\n    issues: read\n  contents: write\n") == []
+
 
 
 
