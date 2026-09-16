@@ -244,6 +244,28 @@ a value the event computes. That dropped `studie-tech/TheNinjaRPG`, and the
 the direction of the error was always the same — the rule was reporting the
 recommended architecture as the vulnerability.
 
+**Two more, and then the count went back up — correctly.** The opt-out is an
+input on the agent *step*, so it is per **job** as well, and it was still being
+read per file. `OpenNHP/opennhp` runs two agent jobs: one sets
+`allowed_non_write_users: '*'` and is read-only, the other holds `contents: write`
+and never opts out. Only the first is reachable by anyone, and the second was
+being reported at `high` because of its sibling. Scoping it correctly took the
+corpus to 40.
+
+Then a reusable-workflow caller nearly went quiet, and that is the more
+instructive half. `evcc-io/evcc` holds `contents: write` in a job that calls
+`./.github/workflows/claude-issue-agent-run.yml` — and the opt-out is in *that*
+file, which a scan of the caller cannot see. Scoping reachability to the job
+would have silently dropped it, and going and looking showed the called workflow
+sets `allowed_non_write_users: '*'` at line 63: the indirection resolves to
+**reachable**, so quiet would have been a false negative on the one case where it
+mattered. A reusable call with no inline agent action is now treated as unknown
+and stays in the loud direction.
+
+**Final: 44 write-scope, 33 untrusted-content, 2 `contents: write`** — from 107,
+50 and 6. The count rose from 40 to 44 on the last fix, which is the point: the
+number is not the objective.
+
 The sweep also sizes the class, and the answer is worth stating plainly. Of 132
 repositories running an agent with the opt-out set, the great majority grant only
 `issues: write` or `pull-requests: write` and use it for what an issue-triage bot

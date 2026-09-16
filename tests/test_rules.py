@@ -1246,6 +1246,110 @@ def test_the_control_moves_the_agent_into_the_write_job_and_fires():
     assert [f.severity for f in findings] == ["high"]
 
 
+# --- ...and the opt-out is per job too ---------------------------------------
+#
+# The same mistake one more time. `allowed_non_write_users` is an input on the
+# agent *step*, so it constrains one job. A sibling job setting the wildcard says
+# nothing about a job that never did. OpenNHP/opennhp is the case: `claude-mentions`
+# holds `contents: write` and never opts out, while `claude-pr-review` sets the
+# wildcard and is read-only - and only the second is reachable by anyone.
+
+SPLIT_OPTOUT_YML = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+  mentions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_args: --allowedTools "Bash(gh issue comment:*),Bash(gh pr comment:*)"
+          prompt: |
+            Triage this issue.
+            BODY: ${{ github.event.issue.body }}
+'''
+
+# The control: the same write scopes in a job that also opts out.
+OPTOUT_IN_THE_WRITE_JOB_YML = SPLIT_OPTOUT_YML.replace(
+    '''      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_args: --allowedTools "Bash(gh issue comment:*),Bash(gh pr comment:*)"''',
+    '''      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: --allowedTools "Bash(gh issue comment:*),Bash(gh pr comment:*)"''',
+)
+assert OPTOUT_IN_THE_WRITE_JOB_YML.count("allowed_non_write_users") == 2
+
+
+def test_a_sibling_jobs_optout_does_not_make_this_job_reachable():
+    """Regression: OpenNHP/opennhp reported `contents: write` as high."""
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "claude.yml", SPLIT_OPTOUT_YML
+    )
+    assert findings == []
+
+
+def test_the_control_opts_out_in_the_write_job_and_fires():
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "claude.yml", OPTOUT_IN_THE_WRITE_JOB_YML
+    )
+    assert [f.severity for f in findings] == ["high", "high"]
+
+
+def test_untrusted_text_in_a_job_that_never_opted_out_is_not_a_path():
+    """The same scoping for the content rule. The `mentions` job does interpolate
+    `${{ github.event.issue.body }}`, but its agent refuses a non-write actor, so
+    an arbitrary author never reaches it."""
+    assert rule_ci_agent_untrusted_issue_content("claude.yml", SPLIT_OPTOUT_YML) == []
+
+
+def test_the_control_opts_out_and_the_content_rule_fires():
+    findings = rule_ci_agent_untrusted_issue_content(
+        "claude.yml", OPTOUT_IN_THE_WRITE_JOB_YML
+    )
+    assert [f.severity for f in findings] == ["high"]
+
+
+REUSABLE_CALLER_YML = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  agent:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    uses: ./.github/workflows/agent-run.yml
+'''
+
+
+def test_a_reusable_caller_stays_loud():
+    """Regression: evcc-io/evcc. The caller holds `contents: write`; the opt-out
+    is in the *called* file, which this scan cannot see. scoping reachability to
+    the job would otherwise have gone quiet here - and evcc's called workflow
+    really does set `allowed_non_write_users: '*'`, so quiet would have been
+    wrong."""
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "claude-issue-agent.yml", REUSABLE_CALLER_YML
+    )
+    assert [f.severity for f in findings] == ["high", "high"]
+
+
 def test_a_reusable_workflow_passing_the_input_through_still_counts():
     """`${{ inputs.x }}` carries a value even though it may be empty at run time.
     The loud direction is correct: the workflow's safety then depends on every

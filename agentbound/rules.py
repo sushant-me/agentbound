@@ -787,6 +787,29 @@ def _job_runs_the_agent(job_text: str) -> bool:
     )
 
 
+def _job_reachable_by_untrusted_author(job_text: str) -> bool:
+    """Whether *this job's* agent can be driven by an author without write access.
+
+    Scoped to the job, because the opt-out is an input on the agent **step**: a
+    sibling job setting the wildcard says nothing about a job that never did.
+    `OpenNHP/opennhp` is the case - one job sets `allowed_non_write_users: '*'`
+    and is read-only, a second holds `contents: write` and never opts out, and
+    only the first is reachable by anyone.
+
+    A reusable-workflow call with no inline agent action cannot be judged from
+    this file, so it stays in the loud direction. `evcc-io/evcc` is why: its
+    caller job holds `contents: write`, and its *called* workflow - a different
+    file - sets `allowed_non_write_users: '*'`. Reading the caller alone, going
+    quiet here would have been a false negative on the one case where the
+    indirection resolves to reachable.
+    """
+    if _REUSABLE_WORKFLOW_RE.search(job_text) and not _AI_AGENT_ACTION_RE.search(
+        job_text
+    ):
+        return True
+    return _untrusted_author_reaches_agent(job_text)
+
+
 def rule_ci_agent_write_scope_on_untrusted_trigger(
     path: str, text: str
 ) -> list[Finding]:
@@ -838,11 +861,18 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
     findings: list[Finding] = []
     if not path.endswith((".yml", ".yaml")):
         return findings
-    if not _AI_AGENT_ACTION_RE.search(text):
+    if not (
+        _AI_AGENT_ACTION_RE.search(text) or _REUSABLE_WORKFLOW_RE.search(text)
+    ):
         return findings
     if not (_workflow_triggers(text) & _UNTRUSTED_AUTHOR_EVENTS):
         return findings
-    if not _untrusted_author_reaches_agent(text):
+    if not (
+        _untrusted_author_reaches_agent(text) or _REUSABLE_WORKFLOW_RE.search(text)
+    ):
+        # A file whose only agent is one call away still counts: the per-job
+        # check below decides reachability, and `_job_reachable_by_untrusted_author`
+        # keeps a reusable call in the loud direction.
         return findings
 
     jobs = _iter_jobs(text)
@@ -851,6 +881,14 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
         if job is not None and not _job_runs_the_agent(job[3]):
             # The grant belongs to a different job than the agent's. Its token
             # never reaches the model, which is the point of splitting them.
+            continue
+        if job is not None and not _job_reachable_by_untrusted_author(job[3]):
+            # The opt-out is an input on the agent step, so it is per **job** as
+            # well. A sibling job setting `allowed_non_write_users: '*'` says
+            # nothing about this one, whose agent still refuses an actor without
+            # write access. `OpenNHP/opennhp` is the case: one job sets the
+            # wildcard and is read-only, a second holds `contents: write` and
+            # never opts out. Only the first is reachable by anyone.
             continue
         if job is not None and _job_gates_on_author_association(job[3]):
             # The message below prescribes "gate the job on author_association";
@@ -958,9 +996,13 @@ def rule_ci_agent_untrusted_issue_content(path: str, text: str) -> list[Finding]
     findings: list[Finding] = []
     if not path.endswith((".yml", ".yaml")):
         return findings
-    if not _AI_AGENT_ACTION_RE.search(text):
+    if not (
+        _AI_AGENT_ACTION_RE.search(text) or _REUSABLE_WORKFLOW_RE.search(text)
+    ):
         return findings
-    if not _untrusted_author_reaches_agent(text):
+    if not (
+        _untrusted_author_reaches_agent(text) or _REUSABLE_WORKFLOW_RE.search(text)
+    ):
         return findings
 
     triggers = _workflow_triggers(text)
@@ -975,6 +1017,10 @@ def rule_ci_agent_untrusted_issue_content(path: str, text: str) -> list[Finding]
         for match in pattern.finditer(text):
             line = text.count("\n", 0, match.start()) + 1
             job = _job_containing(jobs, line)
+            if job is not None and not _job_reachable_by_untrusted_author(job[3]):
+                # Untrusted text in a job whose agent refuses a non-write actor
+                # is not an input path, whatever a sibling job opts into.
+                continue
             if job is not None and _job_gates_on_author_association(job[3]):
                 # The text is authored by whoever triggers the job, and only a
                 # trusted association can trigger this one. The untrusted-author
