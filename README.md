@@ -97,8 +97,9 @@ have tests and a CI step.
 
 Pin a full version instead of `@v1` if you would rather the action stopped
 changing under you — `@v0.1.9` is the first release that ships it, and both tags
-exist. Listing on GitHub Marketplace additionally needs a published release,
-which has not been cut.
+exist. [`v0.1.9` is a published release](https://github.com/sushant-me/agentbound/releases/tag/v0.1.9);
+listing on GitHub Marketplace additionally needs the listing to be enabled in the
+release UI, which has not been done.
 
 It installs into a venv, writes a findings table to the job summary with each
 message in a collapsible block, and exposes `findings` (count at any severity)
