@@ -436,6 +436,23 @@ _WRITE_SCOPE_RE = re.compile(
     re.MULTILINE,
 )
 
+# Positive evidence that an untrusted author can reach the agent at all.
+#
+# The trigger being open is not enough on its own. `anthropics/claude-code-action`
+# checks that the run actor has write permission and refuses otherwise - its own
+# suite asserts "should NOT bypass permission check when allowed_non_write_users
+# is empty" - so a workflow that simply does not set this input is relying on the
+# action's gate, which is the safe configuration. This pattern asks for the
+# explicit opt-out instead of assuming the gate is absent.
+#
+# Consequence, stated plainly: a workflow whose agent action has no such gate and
+# whose input is named something else will not match. That is a false negative,
+# taken deliberately over the false positive of flagging every workflow that gets
+# its permissions right.
+_UNTRUSTED_AUTHOR_BYPASS_RE = re.compile(
+    r"^[ \t]*allowed_non_write_users[ \t]*:", re.MULTILINE
+)
+
 
 def rule_ci_agent_write_scope_on_untrusted_trigger(
     path: str, text: str
@@ -443,9 +460,10 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
     """FILE rule.
 
     A workflow runs an AI agent action, is triggered by an event whose text
-    anyone can author, and grants the job a repository **write** scope. The
-    agent can then be steered by an untrusted author and has something to do
-    with the result.
+    anyone can author, grants the job a repository **write** scope, **and**
+    explicitly opts out of the action's write-permission check for that
+    trigger. The agent can then be steered by an untrusted author and has
+    something to do with the result.
 
     This is deliberately narrower than it could be, and it is a separate rule
     from `ci-agent-untrusted-issue-content` rather than an extension of it,
@@ -457,11 +475,20 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
       agent fetches the issue itself at runtime with the token the job hands it.
       No pattern over the YAML can see that content.
 
-    Requiring all three conditions keeps it off read-only configurations: an
-    agent reading issue text with `contents: read` is the pattern done right,
-    and is not this. What it does not attempt to decide is whether a given
-    match is acceptable - a triage bot that labels issues on purpose matches
-    too. It points at the combination and leaves the judgement to a human.
+    The fourth condition is the one that was added after this rule produced a
+    false positive in the wild. An open trigger plus a write scope is not
+    sufficient: `anthropics/claude-code-action` checks the run actor's write
+    permission and refuses without it, so a workflow that never mentions
+    `allowed_non_write_users` is relying on that gate - the safe configuration,
+    not this. Requiring the explicit opt-out is the difference between flagging
+    workflows that disabled their gate and flagging workflows that got their
+    permissions right.
+
+    The cost is recall, taken knowingly: an agent action whose gate has another
+    name, or none at all, will not match. Read-only configurations are also
+    excluded, since an agent reading issue text with `contents: read` is the
+    pattern done right. Whether a match is otherwise acceptable is still a
+    human's call - a triage bot that labels issues on purpose matches too.
     """
     findings: list[Finding] = []
     if not path.endswith((".yml", ".yaml")):
@@ -469,6 +496,8 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
     if not _AI_AGENT_ACTION_RE.search(text):
         return findings
     if not (_workflow_triggers(text) & _UNTRUSTED_AUTHOR_EVENTS):
+        return findings
+    if not _UNTRUSTED_AUTHOR_BYPASS_RE.search(text):
         return findings
 
     for match in _WRITE_SCOPE_RE.finditer(text):

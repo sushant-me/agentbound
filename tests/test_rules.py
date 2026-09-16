@@ -514,3 +514,65 @@ def test_write_scope_rule_ignores_non_workflow_files():
         )
         == []
     )
+
+
+# The real workflow that produced the false positive: browser-use's
+# .github/workflows/claude.yml. Write scopes, an open trigger, and no
+# `allowed_non_write_users` - it relies on claude-code-action's default
+# write-permission check, which is the safe configuration.
+AGENT_WRITE_SCOPE_TRUSTING_THE_ACTION_GATE = '''\
+name: Claude Code
+on:
+  issue_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+jobs:
+  claude:
+    if: contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+      discussions: write
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+'''
+
+
+def test_write_scope_rule_stays_off_a_workflow_trusting_the_action_gate():
+    """Regression for a false positive found by scanning real repositories.
+
+    `anthropics/claude-code-action` refuses a run actor without write permission
+    unless `allowed_non_write_users` opts out - its own suite asserts "should NOT
+    bypass permission check when allowed_non_write_users is empty". A workflow
+    that never sets that input is relying on the gate. Firing here would flag a
+    repository for getting its permissions right.
+    """
+    assert (
+        rule_ci_agent_write_scope_on_untrusted_trigger(
+            "claude.yml", AGENT_WRITE_SCOPE_TRUSTING_THE_ACTION_GATE
+        )
+        == []
+    )
+
+
+def test_write_scope_rule_fires_once_the_gate_is_disabled():
+    """The same shape, plus the explicit opt-out, is the real exposure."""
+    text = AGENT_WRITE_SCOPE_TRUSTING_THE_ACTION_GATE.replace(
+        "          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}",
+        "          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}\n"
+        '          allowed_non_write_users: "*"',
+    )
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger("claude.yml", text)
+    # Two write scopes in the fixture (`discussions`, `issues`), so two findings,
+    # one per grant a reader has to reconsider.
+    assert [f.rule for f in findings] == [
+        "ci-agent-write-scope-on-untrusted-trigger",
+        "ci-agent-write-scope-on-untrusted-trigger",
+    ]
+    assert {f.line for f in findings} == {15, 16}
