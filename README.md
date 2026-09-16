@@ -1,5 +1,8 @@
 # agentbound
 
+[![CI](https://github.com/sushant-me/agentbound/actions/workflows/ci.yml/badge.svg)](https://github.com/sushant-me/agentbound/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.9%20%7C%203.11%20%7C%203.13-blue)](https://github.com/sushant-me/agentbound/actions/workflows/ci.yml)
+
 Static detector for **AI-agent tool-boundary bugs** — the framework-side class of
 vulnerability where a third-party tool, a confirmation gate, or a CI trigger
 crosses a security boundary the framework intended to enforce.
