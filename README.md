@@ -37,7 +37,16 @@ side. `agentbound` scans the *framework* side, which no general tool does today.
 | `tool-reserved-name-shadowing` | high | a reserved-name set omits a framework-owned tool the framework registers (`def <name>(`) |
 | `confirmation-gate-fails-open` | high | `inspect.signature(predicate)` filters tool args, so a generic predicate returns `False` and the gate opens |
 | `ci-agent-untrusted-issue-content` | high | a workflow runs an AI agent action **and** consumes issue or comment text — from the event payload, or fetched with `gh issue list --json ...body`. Both CI-agent rules also require that an author *without* write access can actually reach the agent: `claude-code-action` and `codex-action` refuse such an actor unless an input opts them in, while `run-gemini-cli` and `gemini-cli-action` perform no actor check at all. The precondition is per action and read from each action's source, and is evaluated per **job**, so a job gated on `author_association` does not inherit it from a public job in the same file (see *Precision* below). The opt-out must also **opt in more than a named account**: both actions bypass their check only for the accounts listed, so `allow-users: "MathiasGruber"` leaves an arbitrary GitHub user unable to reach the agent. What reaches anyone is a `*` or a value the *event* computes — `${{ github.event.issue.user.login }}` is the author of the issue the attacker just opened, which is the CVE's vector. An empty value is likewise no opt-out: `allowed_non_write_users: ""` leaves the write-permission check in place |
-| `ci-agent-write-scope-on-untrusted-trigger` | high | an AI agent action runs in a job triggered by issue/comment/review events, the job grants a `write` scope, **and** an untrusted author can reach the agent. The complement of the rule above: here the untrusted text never appears in the YAML, because the agent fetches the issue itself at runtime with the token the job hands it, so no scan of the file can see it. `id-token: write` is not counted — it mints the OIDC token and is what a hardened setup uses. Evaluated per job, as above. Severity scales with the agent's tool allowlist: if it grants no repository-mutating command the grant belongs to the job's later steps, and the finding drops to `low` with the residual spelled out. A `scope: write` line counts only as a child of a `permissions:` **mapping** — the same two lines appearing as an action input, as in a credential broker's `permissions: \|`, are not a grant. And the grant must be on the job that **runs the agent**: a read-only agent job beside a `publish`/`apply-labels` job holding `issues: write` is the recommended architecture, and the agent never receives that token |
+| `ci-agent-write-scope-on-untrusted-trigger` | high | an AI agent action runs in a job triggered by issue/comment/review events, the job grants a `write` scope, **and** an untrusted author can reach the agent. The complement of the rule above: here the untrusted text never appears in the YAML, because the agent fetches the issue itself at runtime with the token the job hands it, so no scan of the file can see it. `id-token: write` is not counted — it mints the OIDC token and is what a hardened setup uses. Evaluated per job, as above. Severity scales with how far the agent's **mutating tools** reach, which is a property of the `--allowedTools` patterns and not of the permissions block:
+
+| agent's `Bash(...)` allowlist | severity | why |
+|---|---|---|
+| no mutating command at all | `low` | the grant exists for the job's later, non-agent steps |
+| mutating command **naming its target** — `gh issue edit ${{ github.event.issue.number }}:*` | `medium` | bounded; a prefix match on a command string is not a parser, so it stays visible |
+| mutating command matching **any** argument — `gh issue edit:*` | `high` | the agent's reach is broader than its task |
+| no readable allowlist | `high` | *cannot show the agent is constrained* is not *constrained* |
+
+Two workflows can grant an identical `issues: write` and differ completely in what the agent may point it at, so the permissions block alone cannot separate them. The grant must also be on the job that **runs the agent**: a read-only agent job beside a `publish`/`apply-labels` job holding `issues: write` is the recommended architecture, and the agent never receives that token. And a `scope: write` line counts only as a child of a `permissions:` **mapping** — the same two lines appearing as an action input, as in a credential broker's `permissions: \|`, are not a grant |
 | `ci-agent-missing-author-association` | critical | an `issues`-triggered dispatch arm with no `author_association` check while other arms have one, **and** an agent is reachable from the file — either an agent action or a call to a reusable workflow that may hold one. A repository that only labels issues, with no agent anywhere, is not reported |
 | `tool-dict-last-wins` | medium | a tool-name→tool dict assigned unconditionally while duplicates are only `logging.warning`-ed (last-wins shadowing) |
 | `tool-built-in-silent-replace` | high | a callable tool registers `toolsDict[name] = this` after a duplicate throw gated on `!isInModelTool(...)`, silently displacing a built-in |
@@ -265,6 +274,31 @@ and stays in the loud direction.
 **Final: 44 write-scope, 33 untrusted-content, 2 `contents: write`** — from 107,
 50 and 6. The count rose from 40 to 44 on the last fix, which is the point: the
 number is not the objective.
+
+**Then the last refinement, and the one that separates the mitigation from the
+vulnerability.** Everything above reads the *permissions block*. But the question
+that decides the outcome is what the agent's `--allowedTools` patterns are bounded
+to, and a `Bash(...)` entry is a command **prefix** — the grant ends at Claude
+Code's `:*` wildcard, so whatever precedes it is the bound:
+
+```
+Bash(gh issue edit:*)                      the agent may edit any issue
+Bash(gh issue edit 1234:*)                 bounded to that issue
+Bash(gh issue edit ${{ ...number }}:*)     bounded to the input
+```
+
+The rule now distinguishes these, and the corpus validated it in **both
+directions on real code**. `MHSanaei/3x-ui` writes every mutating pattern as
+`Bash(gh issue edit ${{ github.event.issue.number }} --add-label:*)` and friends —
+the Layer 1 mitigation from the guide, implemented properly — and is reported at
+**`medium`** rather than `high`. `evcc-io/evcc` writes `gh issue edit:*` with a
+wildcard opt-out and is reported **`high`**; so is `tokio-rs/toasty`.
+
+That is also a cross-check worth noting: `evcc` was identified by hand, from
+reading the two workflow files, and the rule was changed afterwards for unrelated
+reasons — and it independently lands on the same repository and the same reason.
+A rule and a person agreeing is not proof, but a rule that had disagreed would
+have meant one of them was wrong.
 
 The sweep also sizes the class, and the answer is worth stating plainly. Of 132
 repositories running an agent with the opt-out set, the great majority grant only

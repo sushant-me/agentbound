@@ -16,6 +16,7 @@ from agentbound.rules import (
     _agent_has_repo_write_tool,
     _iter_write_scopes,
     _untrusted_author_reaches_agent,
+    _agent_mutation_reach,
 )
 
 # --- rule 1: reserved-name shadowing ---------------------------------------
@@ -1348,6 +1349,77 @@ def test_a_reusable_caller_stays_loud():
         "claude-issue-agent.yml", REUSABLE_CALLER_YML
     )
     assert [f.severity for f in findings] == ["high", "high"]
+
+
+# --- how far the agent's mutating tools reach --------------------------------
+#
+# A `Bash(...)` allowlist entry is a command *prefix*, so what precedes the `:*`
+# wildcard is what the grant is bounded to. Two workflows can grant an identical
+# `issues: write` and differ completely in what the agent may point it at. This
+# is the distinction the permissions-based view cannot make, and it is the whole
+# of Layer 1 in the mitigation guide.
+
+def test_mutation_reach_classification():
+    def reach(allow):
+        return _agent_mutation_reach(f'claude_args: --allowedTools "{allow}"')
+
+    assert reach("Read,Grep,Glob") == "none"
+    assert reach("Read,Bash(gh issue view:*),Bash(gh pr diff:*)") == "none"
+    assert reach("Bash(gh issue edit:*)") == "unbounded"
+    assert reach("Bash(gh issue comment:*)") == "unbounded"
+    assert reach("Bash(git push:*)") == "unbounded"
+    assert reach("Bash(gh api:*)") == "unbounded"
+    assert reach("Bash(gh issue edit 1234:*)") == "bounded"
+    assert reach("Bash(gh issue edit ${{ inputs.issue_number }}:*)") == "bounded"
+    assert reach("Bash(git push origin fix/issue-1:*)") == "bounded"
+    # one unbounded entry is enough to make the whole grant unbounded
+    assert reach("Bash(gh issue edit 1234:*),Bash(git push:*)") == "unbounded"
+    # no readable allowlist is not the same as a constrained agent
+    assert _agent_mutation_reach("permissions:\n  issues: write\n") == "unknown"
+
+
+BOUNDED_TOOL_PATTERN_YML = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: --allowedTools "Read,Grep,Bash(gh issue edit ${{ github.event.issue.number }}:*),Bash(gh issue comment ${{ github.event.issue.number }}:*)"
+'''
+
+UNBOUNDED_TOOL_PATTERN_YML = BOUNDED_TOOL_PATTERN_YML.replace(
+    "gh issue edit ${{ github.event.issue.number }}:*", "gh issue edit:*"
+).replace(
+    "gh issue comment ${{ github.event.issue.number }}:*", "gh issue comment:*"
+)
+assert "gh issue edit:*" in UNBOUNDED_TOOL_PATTERN_YML
+assert UNBOUNDED_TOOL_PATTERN_YML != BOUNDED_TOOL_PATTERN_YML
+
+
+def test_a_bounded_tool_pattern_is_medium_not_high():
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "triage.yml", BOUNDED_TOOL_PATTERN_YML
+    )
+    assert [f.severity for f in findings] == ["medium"]
+    assert "bounded" in findings[0].message
+
+
+def test_the_control_removes_the_bound_and_is_high():
+    """The positive control: the same workflow, with the target taken out of the
+    pattern. Nothing else differs."""
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "triage.yml", UNBOUNDED_TOOL_PATTERN_YML
+    )
+    assert [f.severity for f in findings] == ["high"]
+
 
 
 def test_a_reusable_workflow_passing_the_input_through_still_counts():

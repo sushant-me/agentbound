@@ -741,25 +741,69 @@ _TOOL_ALLOWLIST_RE = re.compile(
 # Commands by which an agent could change the repository rather than describe it.
 # `gh issue view` and `gh search issues` are deliberately absent: reading is what
 # the hardened configuration still needs.
-_MUTATING_AGENT_COMMAND_RE = re.compile(
-    r"gh\s+(?:issue|pr|label|release|workflow|repo|run)\s+"
+# One `Bash(...)` entry in an allowlist. The inner text is a command prefix that
+# ends at Claude Code's `:*` wildcard.
+_BASH_ENTRY_RE = re.compile(r"Bash\((?P<prefix>[^)]*)\)")
+
+# A repository-mutating command, split into the verb and whatever the grant says
+# after it. `rest` empty means the grant is unbounded - it stops at the verb.
+_MUTATING_VERB_RE = re.compile(
+    r"^(?P<verb>gh\s+(?:issue|pr|label|release|workflow|repo|run)\s+"
     r"(?:comment|edit|close|reopen|merge|delete|create|add|remove|transfer|lock)"
-    r"|gh\s+api\b"
-    r"|git\s+push\b",
+    r"|gh\s+api"
+    r"|git\s+push)\b(?P<rest>.*)$",
     re.IGNORECASE,
 )
+
+
+def _agent_mutation_reach(job_text: str) -> str:
+    """How far the agent's mutating tools reach: one of four answers.
+
+    A `Bash(...)` entry in an allowlist is a command **prefix**: the grant ends at
+    Claude Code's `:*` wildcard, so whatever precedes the wildcard is what the
+    grant is bounded to.
+
+        Bash(gh issue edit:*)                      -> unbounded
+        Bash(gh issue edit 1234:*)                 -> bounded to that issue
+        Bash(gh issue edit ${{ inputs.issue }}:*)  -> bounded to the input
+
+    That distinction is the whole of Layer 1 in `docs/mitigations.md`, and it is
+    the one thing the permissions-based rule cannot see: two workflows can grant
+    an identical `issues: write` and be completely different in what the agent may
+    point it at. One of them is the recommendation; the other is the shape this
+    project exists to describe.
+
+    Returns `unknown` when no allowlist was readable - callers must read that as
+    "cannot show the agent is constrained", never as constrained.
+    """
+    allowlists = _TOOL_ALLOWLIST_RE.findall(job_text)
+    if not allowlists:
+        return "unknown"
+    reach: set[str] = set()
+    for allowlist in allowlists:
+        for match in _BASH_ENTRY_RE.finditer(allowlist):
+            prefix = re.sub(r":\*$", "", match.group("prefix").strip()).strip()
+            verb = _MUTATING_VERB_RE.match(prefix)
+            if verb:
+                reach.add("bounded" if verb.group("rest").strip() else "unbounded")
+    if "unbounded" in reach:
+        return "unbounded"
+    if "bounded" in reach:
+        return "bounded"
+    return "none"
 
 
 def _agent_has_repo_write_tool(job_text: str) -> bool | None:
     """Whether the agent steps' allowlists grant a repository-mutating command.
 
     `None` means no allowlist was readable, and callers must treat that as
-    "cannot show the agent is constrained" - never as constrained.
+    "cannot show the agent is constrained" - never as constrained. Kept as the
+    boolean view of `_agent_mutation_reach` for callers that only need yes/no.
     """
-    allowlists = _TOOL_ALLOWLIST_RE.findall(job_text)
-    if not allowlists:
+    reach = _agent_mutation_reach(job_text)
+    if reach == "unknown":
         return None
-    return any(_MUTATING_AGENT_COMMAND_RE.search(a) for a in allowlists)
+    return reach in ("bounded", "unbounded")
 
 
 def _job_runs_the_agent(job_text: str) -> bool:
@@ -900,7 +944,8 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
         # step posts - so it is reported at the severity the residual deserves
         # rather than dropped, which is the one thing that would make this
         # indistinguishable from a rule that had stopped working.
-        if job is not None and _agent_has_repo_write_tool(job[3]) is False:
+        reach = _agent_mutation_reach(job[3]) if job is not None else "unknown"
+        if reach == "none":
             findings.append(
                 Finding(
                     rule="ci-agent-write-scope-on-untrusted-trigger",
@@ -923,6 +968,34 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
                     ),
                 )
             )
+            continue
+        if reach == "bounded":
+            # The agent keeps the tool but the grant names a target, so it
+            # cannot be pointed at a different issue or ref. That is Layer 1 of
+            # `docs/mitigations.md`, and it is a real bound - but the pattern is
+            # a prefix match on a command string, not a parser, so this is
+            # reported rather than passed over in silence.
+            findings.append(
+                Finding(
+                    rule="ci-agent-write-scope-on-untrusted-trigger",
+                    severity="medium",
+                    path=path,
+                    line=line,
+                    message=(
+                        f"an AI agent action runs in a job triggered by "
+                        f"issue/comment/review events and the job grants "
+                        f"`{scope}: write`. The agent's mutating tool patterns "
+                        "name their target rather than matching any argument, so "
+                        "a steered agent cannot be redirected to another issue or "
+                        "ref - the grant is bounded. Treat this as a review item "
+                        "rather than a finding to suppress: the bound is a prefix "
+                        "match on a command string, not a parse, so confirm the "
+                        "argument is taken from the event and not from the "
+                        "agent's own output."
+                    ),
+                )
+            )
+            continue
             continue
         findings.append(
             Finding(
