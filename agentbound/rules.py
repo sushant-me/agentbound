@@ -436,22 +436,57 @@ _WRITE_SCOPE_RE = re.compile(
     re.MULTILINE,
 )
 
-# Positive evidence that an untrusted author can reach the agent at all.
+# Agent actions, and whether each refuses a run actor without write permission.
 #
-# The trigger being open is not enough on its own. `anthropics/claude-code-action`
-# checks that the run actor has write permission and refuses otherwise - its own
-# suite asserts "should NOT bypass permission check when allowed_non_write_users
-# is empty" - so a workflow that simply does not set this input is relying on the
-# action's gate, which is the safe configuration. This pattern asks for the
-# explicit opt-out instead of assuming the gate is absent.
+# A tuple names the input that opts users in past that check, so a workflow that
+# sets it is reachable by an author who does not have write access. `None` means
+# the action performs no actor check at all, which leaves the trigger as the only
+# thing between an untrusted author and the agent.
 #
-# Consequence, stated plainly: a workflow whose agent action has no such gate and
-# whose input is named something else will not match. That is a false negative,
-# taken deliberately over the false positive of flagging every workflow that gets
-# its permissions right.
-_UNTRUSTED_AUTHOR_BYPASS_RE = re.compile(
-    r"^[ \t]*allowed_non_write_users[ \t]*:", re.MULTILINE
-)
+# Every entry was read from the action's own source, not inferred:
+#   claude-code-action      checks the run actor's permission; its suite asserts
+#                           "should NOT bypass permission check when
+#                           allowed_non_write_users is empty"
+#   codex-action            src/checkActorPermissions.ts calls
+#                           getCollaboratorPermissionLevel and requires
+#                           admin/write/maintain; `allow-users` opts others in
+#   run-gemini-cli          516-line composite action, no actor check anywhere
+#   gemini-cli-action       composite action, no actor check anywhere
+#   claude-code-base-action no actor check and no such input; it is the runner
+#                           the wrapper adds the check around
+#
+# An action not listed here is unknown and is treated as reachable, so a new
+# action is loud rather than silently assumed safe.
+_AGENT_ACTIONS: dict[str, tuple[str, ...] | None] = {
+    "anthropics/claude-code-action": (r"^[ \t]*allowed_non_write_users[ \t]*:",),
+    "openai/codex-action": (r"^[ \t]*allow-users[ \t]*:",),
+    "google-github-actions/run-gemini-cli": None,
+    "google-gemini/gemini-cli-action": None,
+    "anthropics/claude-code-base-action": None,
+}
+
+
+def _untrusted_author_reaches_agent(text: str) -> bool:
+    """Whether a workflow lets an author *without* write access drive the agent.
+
+    This is the precondition both CI-agent rules need and neither can read off
+    the trigger. An action that checks the actor's permission refuses an
+    untrusted author, so a workflow that never opts out is relying on that gate
+    - the safe configuration, and not what these rules are looking for. An
+    action with no such check leaves the trigger as the only barrier.
+    """
+    lowered = text.lower()
+    used = [name for name in _AGENT_ACTIONS if name in lowered]
+    if not used:
+        # Unrecognised action: cannot show it gates, so do not assume it does.
+        return bool(_AI_AGENT_ACTION_RE.search(text))
+    for name in used:
+        opt_outs = _AGENT_ACTIONS[name]
+        if opt_outs is None:
+            return True
+        if any(re.search(p, text, re.MULTILINE) for p in opt_outs):
+            return True
+    return False
 
 
 def rule_ci_agent_write_scope_on_untrusted_trigger(
@@ -497,7 +532,7 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
         return findings
     if not (_workflow_triggers(text) & _UNTRUSTED_AUTHOR_EVENTS):
         return findings
-    if not _UNTRUSTED_AUTHOR_BYPASS_RE.search(text):
+    if not _untrusted_author_reaches_agent(text):
         return findings
 
     for match in _WRITE_SCOPE_RE.finditer(text):
@@ -576,6 +611,8 @@ def rule_ci_agent_untrusted_issue_content(path: str, text: str) -> list[Finding]
     if not path.endswith((".yml", ".yaml")):
         return findings
     if not _AI_AGENT_ACTION_RE.search(text):
+        return findings
+    if not _untrusted_author_reaches_agent(text):
         return findings
 
     triggers = _workflow_triggers(text)

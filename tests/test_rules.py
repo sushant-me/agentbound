@@ -576,3 +576,87 @@ def test_write_scope_rule_fires_once_the_gate_is_disabled():
         "ci-agent-write-scope-on-untrusted-trigger",
     ]
     assert {f.line for f in findings} == {15, 16}
+
+
+# The precondition is a property of the *action*, not the trigger, so it has to
+# be tested per action. These two are the pair that matters: one action checks
+# the actor's permission, the other does not.
+AGENT_WITH_ISSUE_BODY_GEMINI = '''\
+name: triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: "Triage this: ${{ github.event.issue.body }}"
+'''
+
+AGENT_WITH_ISSUE_BODY_CLAUDE_NO_OPTOUT = '''\
+name: triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "Triage this: ${{ github.event.issue.body }}"
+'''
+
+
+def test_ungated_action_still_fires_on_the_data_flow():
+    """`run-gemini-cli` is a composite action with no actor check.
+
+    This is the original finding's shape. Requiring an opt-out input globally
+    would have made it vanish, so the precondition has to be per action.
+    """
+    findings = rule_ci_agent_untrusted_issue_content(
+        "triage.yml", AGENT_WITH_ISSUE_BODY_GEMINI
+    )
+    assert [f.rule for f in findings] == ["ci-agent-untrusted-issue-content"]
+
+
+def test_gated_action_without_optout_does_not_fire_on_the_data_flow():
+    """`claude-code-action` refuses a run actor without write permission.
+
+    Same data flow as the test above, opposite verdict, because the action
+    refuses the author who would supply it.
+    """
+    assert (
+        rule_ci_agent_untrusted_issue_content(
+            "triage.yml", AGENT_WITH_ISSUE_BODY_CLAUDE_NO_OPTOUT
+        )
+        == []
+    )
+
+
+def test_gated_action_with_optout_fires_again():
+    text = AGENT_WITH_ISSUE_BODY_CLAUDE_NO_OPTOUT.replace(
+        '          prompt:',
+        '          allowed_non_write_users: "*"\n          prompt:',
+    )
+    findings = rule_ci_agent_untrusted_issue_content("triage.yml", text)
+    assert [f.rule for f in findings] == ["ci-agent-untrusted-issue-content"]
+
+
+def test_codex_action_counts_as_gated():
+    """`openai/codex-action` calls getCollaboratorPermissionLevel; `allow-users` opts in."""
+    gated = AGENT_WITH_ISSUE_BODY_CLAUDE_NO_OPTOUT.replace(
+        "anthropics/claude-code-action@v1", "openai/codex-action@v1"
+    )
+    assert rule_ci_agent_untrusted_issue_content("t.yml", gated) == []
+    opted_in = gated.replace(
+        '          prompt:', '          allow-users: "*"\n          prompt:'
+    )
+    assert [
+        f.rule
+        for f in rule_ci_agent_untrusted_issue_content("t.yml", opted_in)
+    ] == ["ci-agent-untrusted-issue-content"]
