@@ -56,6 +56,8 @@ ORIGINS: list[tuple[str, str, str, str]] = [
      "set_model_response left out of _RESERVED_TOOL_NAMES"),
     ("adk-python", "rule_tool_dict_last_wins", "tool-dict-last-wins",
      "tools_dict assigned under a logged duplicate"),
+    ("adk-python", "rule_confirmation_gate_fails_open", "confirmation-gate-fails-open",
+     "an inspect.signature filter that opens the gate for an unrecognised predicate"),
     ("adk-go", "rule_go_inmodel_tool_unoccupied", "tool-inmodel-name-unoccupied",
      "setTool() without registering the name"),
     ("adk-java", "rule_java_inmodel_tool_unoccupied", "tool-inmodel-name-unoccupied",

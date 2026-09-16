@@ -740,9 +740,7 @@ def test_every_rule_has_a_declared_origin():
 
     declared = {fn for _, fn, _, _ in recall.ORIGINS}
     implemented = {r.__name__ for r in list(FILE_RULES) + list(PROJECT_RULES)}
-    # `confirmation-gate-fails-open` is exempt: its origin repo is not replicated
-    # locally, so there is nothing to audit it against yet.
-    missing = implemented - declared - {"rule_confirmation_gate_fails_open"}
+    missing = implemented - declared
     assert not missing, f"rules with no declared origin: {sorted(missing)}"
 
 
