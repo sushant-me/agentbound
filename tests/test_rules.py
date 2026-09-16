@@ -6,6 +6,8 @@ from agentbound.rules import (
     rule_ci_agent_missing_author_association,
     rule_tool_dict_last_wins,
     rule_ts_builtin_tool_silent_replace,
+    rule_go_inmodel_tool_unoccupied,
+    rule_java_inmodel_tool_unoccupied,
 )
 
 # --- rule 1: reserved-name shadowing ---------------------------------------
@@ -158,3 +160,51 @@ def test_ts_builtin_tool_silent_replace_clean_when_guard_covers_inmodel():
     assert findings == []
 
 
+
+
+# --- rule 6: Go in-model tool unoccupied ------------------------------------
+
+GO_GOOGLE_SEARCH = '''\
+func (s GoogleSearch) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+\treturn setTool(req, &genai.Tool{
+\t\tGoogleSearch: &genai.GoogleSearch{},
+\t})
+}
+'''
+
+
+def test_go_inmodel_tool_unoccupied_detected():
+    findings = rule_go_inmodel_tool_unoccupied("google_search.go", GO_GOOGLE_SEARCH)
+    assert any(f.rule == "tool-inmodel-name-unoccupied" for f in findings)
+
+
+def test_go_clean_when_name_registered():
+    clean = GO_GOOGLE_SEARCH.replace("return setTool(req,", "req.Tools[s.Name()] = s\n\treturn setTool(req,")
+    assert rule_go_inmodel_tool_unoccupied("google_search.go", clean) == []
+
+
+# --- rule 7: Java in-model tool unoccupied ----------------------------------
+
+JAVA_GOOGLE_SEARCH = '''\
+  public Completable processLlmRequest(
+      LlmRequest.Builder llmRequestBuilder, ToolContext toolContext) {
+    GenerateContentConfig.Builder configBuilder =
+        llmRequestBuilder.build().config()
+            .map(GenerateContentConfig::toBuilder)
+            .orElseGet(GenerateContentConfig::builder);
+    updatedToolsBuilder.add(Tool.builder().googleSearch(GoogleSearch.builder().build()).build());
+    configBuilder.tools(updatedToolsBuilder.build());
+    return Completable.complete();
+  }
+'''
+
+
+def test_java_inmodel_tool_unoccupied_detected():
+    findings = rule_java_inmodel_tool_unoccupied("GoogleSearchTool.java", JAVA_GOOGLE_SEARCH)
+    assert any(f.rule == "tool-inmodel-name-unoccupied" for f in findings)
+
+
+def test_java_clean_when_appendtools_used():
+    clean = JAVA_GOOGLE_SEARCH.replace("return Completable.complete();",
+                                       "llmRequestBuilder.appendTools(ImmutableList.of(this));\n    return Completable.complete();")
+    assert rule_java_inmodel_tool_unoccupied("GoogleSearchTool.java", clean) == []

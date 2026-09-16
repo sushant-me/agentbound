@@ -14,7 +14,7 @@ _SKIP_DIRS = {
 }
 
 # Only run text rules on these extensions (cheap pre-filter).
-_SCAN_EXTS = {".py", ".yml", ".yaml", ".ts", ".tsx", ".js", ".jsx"}
+_SCAN_EXTS = {".py", ".yml", ".yaml", ".ts", ".tsx", ".js", ".jsx", ".go", ".java"}
 
 # Skip very large files (minified bundles, generated code) — they are noise
 # for a static pattern detector and rarely contain hand-written tool wiring.

@@ -36,6 +36,7 @@ side. `agentbound` scans the *framework* side, which no general tool does today.
 | `ci-agent-missing-author-association` | critical | an `issues`-triggered dispatch arm with no `author_association` check (used elsewhere in the workflow) |
 | `tool-dict-last-wins` | medium | a tool-name→tool dict assigned unconditionally while duplicates are only `logging.warning`-ed (last-wins shadowing) |
 | `tool-built-in-silent-replace` | high | a callable tool registers `toolsDict[name] = this` after a duplicate throw gated on `!isInModelTool(...)`, silently displacing a built-in |
+| `tool-inmodel-name-unoccupied` | high | an in-model tool appends to the request's config tools (Go `setTool()`, Java `processLlmRequest` without `appendTools()`) but never registers its name, so a server-provided tool of the same name shadows it |
 
 Each rule generalises one real, disclosed finding (documented in the rule
 docstrings).
@@ -70,9 +71,9 @@ python -m pytest tests/
 
 The rules are heuristics that surface high-signal locations and explain the
 mechanism; they are not a substitute for a human confirming reachability and
-impact. Python (`.py`), TypeScript/JavaScript (`.ts`/`.tsx`/`.js`/`.jsx`), and
-GitHub Actions (`.yml`/`.yaml`) are scanned. The reserved-name watchlist is
-framework-specific and currently covers the ADK family; contributions to widen
-coverage are welcome.
+impact. Python (`.py`), TypeScript/JavaScript (`.ts`/`.tsx`/`.js`/`.jsx`), Go
+(`.go`), Java (`.java`) and GitHub Actions (`.yml`/`.yaml`) are scanned. The
+reserved-name watchlist is framework-specific and currently covers the ADK
+family; contributions to widen coverage are welcome.
 
 Authored by Sushant Poudel ([@sushant-me](https://github.com/sushant-me)).

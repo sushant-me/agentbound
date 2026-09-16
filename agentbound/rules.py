@@ -282,11 +282,87 @@ def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Findi
     return findings
 
 
+# --- Go / Java: in-model tools that never occupy their name ------------------
+# google/adk-go and google/adk-java register in-model built-ins (google_search,
+# google_maps, ...) by appending straight to the request's config tools, without
+# registering the name in the tool map. The duplicate-name guard therefore never
+# sees them, so a third-party MCP tool of the same name is accepted and wins
+# dispatch.  Confirmed in both ports by local reproduction.
+
+_GO_SETTOOL_RE = re.compile(r"\bsetTool\s*\(")
+_GO_NAME_OCCUPIED_RE = re.compile(r"\breq\.Tools\s*\[|\bPackTool\s*\(")
+
+
+def rule_go_inmodel_tool_unoccupied(path: str, text: str) -> list[Finding]:
+    """GO rule — generalises google/adk-go `google_search` shadowing."""
+    findings: list[Finding] = []
+    if not path.endswith(".go"):
+        return findings
+    if "ProcessRequest" not in text or not _GO_SETTOOL_RE.search(text):
+        return findings
+    if _GO_NAME_OCCUPIED_RE.search(text):
+        return findings
+    line = text.count("\n", 0, text.find("setTool(")) + 1
+    findings.append(
+        Finding(
+            rule="tool-inmodel-name-unoccupied",
+            severity="high",
+            path=path,
+            line=line,
+            message=(
+                "in-model tool calls setTool() (appends to config tools) but never "
+                "registers its name in req.Tools, so a server-provided tool of the "
+                "same name can shadow it (google_search class)"
+            ),
+        )
+    )
+    return findings
+
+
+_JAVA_PROCESS_RE = re.compile(r"\bprocessLlmRequest\s*\(")
+_JAVA_CONFIG_TOOLS_RE = re.compile(r"configBuilder\.tools\s*\(|\.tools\s*\(")
+_JAVA_APPEND_RE = re.compile(r"\bappendTools\s*\(")
+
+
+def rule_java_inmodel_tool_unoccupied(path: str, text: str) -> list[Finding]:
+    """JAVA rule — generalises google/adk-java `google_search` shadowing."""
+    findings: list[Finding] = []
+    if not path.endswith(".java"):
+        return findings
+    base = path.replace("\\", "/").rsplit("/", 1)[-1]
+    # Skip tests and orchestration classes (they append tools on behalf of others).
+    if "/test/" in path or base.endswith("Test.java") or "Flow" in base:
+        return findings
+    if not _JAVA_PROCESS_RE.search(text):
+        return findings
+    if not _JAVA_CONFIG_TOOLS_RE.search(text):
+        return findings
+    if _JAVA_APPEND_RE.search(text):
+        return findings
+    line = text.count("\n", 0, text.find("processLlmRequest")) + 1
+    findings.append(
+        Finding(
+            rule="tool-inmodel-name-unoccupied",
+            severity="high",
+            path=path,
+            line=line,
+            message=(
+                "processLlmRequest() appends to config tools without appendTools(), "
+                "so the tool never occupies its name and a server-provided tool of "
+                "the same name can shadow it (google_search class)"
+            ),
+        )
+    )
+    return findings
+
+
 FILE_RULES = [
     rule_confirmation_gate_fails_open,
     rule_ci_agent_missing_author_association,
     rule_tool_dict_last_wins,
     rule_ts_builtin_tool_silent_replace,
+    rule_go_inmodel_tool_unoccupied,
+    rule_java_inmodel_tool_unoccupied,
 ]
 
 PROJECT_RULES = [
