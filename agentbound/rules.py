@@ -417,6 +417,85 @@ _UNTRUSTED_ISSUE_INPUTS: list[tuple[str, re.Pattern[str], str | None]] = [
 
 _ON_BLOCK_RE = re.compile(r"^['\"]?on['\"]?\s*:(.*)$", re.MULTILINE)
 
+# Events whose payload text is authored by whoever opened the issue, comment or
+# review - i.e. by anyone, on a public repository.
+_UNTRUSTED_AUTHOR_EVENTS = frozenset({
+    "issues",
+    "issue_comment",
+    "pull_request_review",
+    "pull_request_review_comment",
+})
+
+# A job-level `write` grant. `id-token: write` is deliberately absent: it mints
+# the OIDC token the agent actions use to authenticate, which is the *safe*
+# replacement for a static key, and pairing it with a write scope is normal.
+_WRITE_SCOPE_RE = re.compile(
+    r"^[ \t]*(?P<scope>contents|issues|pull-requests|actions|packages|"
+    r"deployments|security-events|statuses|checks|discussions)"
+    r"[ \t]*:[ \t]*write[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def rule_ci_agent_write_scope_on_untrusted_trigger(
+    path: str, text: str
+) -> list[Finding]:
+    """FILE rule.
+
+    A workflow runs an AI agent action, is triggered by an event whose text
+    anyone can author, and grants the job a repository **write** scope. The
+    agent can then be steered by an untrusted author and has something to do
+    with the result.
+
+    This is deliberately narrower than it could be, and it is a separate rule
+    from `ci-agent-untrusted-issue-content` rather than an extension of it,
+    because the two detect different things:
+
+    * that rule matches the untrusted text **appearing in the workflow** - a
+      direct data flow, visible in the file.
+    * this rule matches the untrusted text **never appearing**, because the
+      agent fetches the issue itself at runtime with the token the job hands it.
+      No pattern over the YAML can see that content.
+
+    Requiring all three conditions keeps it off read-only configurations: an
+    agent reading issue text with `contents: read` is the pattern done right,
+    and is not this. What it does not attempt to decide is whether a given
+    match is acceptable - a triage bot that labels issues on purpose matches
+    too. It points at the combination and leaves the judgement to a human.
+    """
+    findings: list[Finding] = []
+    if not path.endswith((".yml", ".yaml")):
+        return findings
+    if not _AI_AGENT_ACTION_RE.search(text):
+        return findings
+    if not (_workflow_triggers(text) & _UNTRUSTED_AUTHOR_EVENTS):
+        return findings
+
+    for match in _WRITE_SCOPE_RE.finditer(text):
+        line = text.count("\n", 0, match.start()) + 1
+        scope = match.group("scope")
+        findings.append(
+            Finding(
+                rule="ci-agent-write-scope-on-untrusted-trigger",
+                severity="high",
+                path=path,
+                line=line,
+                message=(
+                    f"an AI agent action runs in a job triggered by "
+                    f"issue/comment/review events - text anyone can author - "
+                    f"and the job grants `{scope}: write`. An untrusted author "
+                    "can therefore steer an agent that holds write access, and "
+                    "the workflow need not mention the text at all: the agent "
+                    "can fetch the issue itself with the token it is given, "
+                    "which no scan of this file can see. Either drop the write "
+                    "scope (read-only plus a separate credentialed step is the "
+                    "usual fix), or gate the job on author_association and keep "
+                    "untrusted text out of the instruction channel."
+                ),
+            )
+        )
+    return findings
+
 
 def _workflow_triggers(text: str) -> set[str]:
     """Event names from the workflow's `on:` block, best effort.
@@ -508,6 +587,7 @@ FILE_RULES = [
     rule_confirmation_gate_fails_open,
     rule_ci_agent_missing_author_association,
     rule_ci_agent_untrusted_issue_content,
+    rule_ci_agent_write_scope_on_untrusted_trigger,
     rule_tool_dict_last_wins,
     rule_ts_builtin_tool_silent_replace,
     rule_go_inmodel_tool_unoccupied,

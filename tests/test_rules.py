@@ -5,6 +5,7 @@ from agentbound.rules import (
     rule_confirmation_gate_fails_open,
     rule_ci_agent_missing_author_association,
     rule_ci_agent_untrusted_issue_content,
+    rule_ci_agent_write_scope_on_untrusted_trigger,
     rule_tool_dict_last_wins,
     rule_ts_builtin_tool_silent_replace,
     rule_go_inmodel_tool_unoccupied,
@@ -361,3 +362,155 @@ def test_fetched_issues_still_fire_on_a_schedule_only_workflow():
     """Unlike the event payload, `gh issue list` really does return content."""
     findings = rule_ci_agent_untrusted_issue_content("sched.yml", AGENT_FETCHING_ISSUES)
     assert findings, "fetched issue text must still be reported"
+
+
+# --- ci-agent-write-scope-on-untrusted-trigger -----------------------------
+
+AGENT_AUTO_TRIAGE_WITH_WRITE = '''\
+name: triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          prompt: "/triage-issue ISSUE_NUMBER: ${{ github.event.issue.number }}"
+'''
+
+AGENT_AUTO_TRIAGE_READ_ONLY = '''\
+name: triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "/triage-issue"
+'''
+
+AGENT_ON_PUSH_WITH_WRITE = '''\
+name: docs
+on:
+  push:
+    branches: [main]
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: Summarise the diff.
+'''
+
+NO_AGENT_ISSUES_WITH_WRITE = '''\
+name: labeler
+on:
+  issues:
+    types: [opened]
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - run: gh issue edit "$NUMBER" --add-label triage
+'''
+
+AGENT_ISSUES_WITH_ID_TOKEN_ONLY = '''\
+name: triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "/triage-issue"
+'''
+
+
+def test_write_scope_on_untrusted_trigger_detected():
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "triage.yml", AGENT_AUTO_TRIAGE_WITH_WRITE
+    )
+    assert [f.rule for f in findings] == [
+        "ci-agent-write-scope-on-untrusted-trigger"
+    ]
+    assert findings[0].line == 10  # the `issues: write` line
+    assert "issues: write" in findings[0].message
+
+
+def test_write_scope_rule_stays_off_a_read_only_agent():
+    """An agent reading issue text with no write grant is the pattern done right."""
+    assert (
+        rule_ci_agent_write_scope_on_untrusted_trigger(
+            "triage.yml", AGENT_AUTO_TRIAGE_READ_ONLY
+        )
+        == []
+    )
+
+
+def test_write_scope_rule_needs_an_untrusted_author_event():
+    """A push-triggered agent with `contents: write` is not this exposure."""
+    assert (
+        rule_ci_agent_write_scope_on_untrusted_trigger(
+            "docs.yml", AGENT_ON_PUSH_WITH_WRITE
+        )
+        == []
+    )
+
+
+def test_write_scope_rule_needs_an_agent_action():
+    assert (
+        rule_ci_agent_write_scope_on_untrusted_trigger(
+            "labeler.yml", NO_AGENT_ISSUES_WITH_WRITE
+        )
+        == []
+    )
+
+
+def test_id_token_write_is_not_a_dangerous_write_scope():
+    """`id-token: write` mints the OIDC token the agent authenticates with.
+
+    It is the safe replacement for a static key and appears in hardenend
+    configurations, so counting it would fire on exactly the setups that got it
+    right.
+    """
+    assert (
+        rule_ci_agent_write_scope_on_untrusted_trigger(
+            "triage.yml", AGENT_ISSUES_WITH_ID_TOKEN_ONLY
+        )
+        == []
+    )
+
+
+def test_write_scope_rule_ignores_non_workflow_files():
+    assert (
+        rule_ci_agent_write_scope_on_untrusted_trigger(
+            "main.py", AGENT_AUTO_TRIAGE_WITH_WRITE
+        )
+        == []
+    )
