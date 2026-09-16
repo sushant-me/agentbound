@@ -114,8 +114,12 @@ written by someone who was not trying to make this tool look good. The best one
 available is the **fix** for a published CVE.
 
 `CVE-2026-44246` (nnU-Net, agentic workflow injection in
-`.github/workflows/issue-triage.yml`, fixed in `v2.4.1`) is that file. Against
-the vulnerable revision the rules fire on the CVE's own vector:
+`.github/workflows/issue-triage.yml`, fixed in `v2.4.1`, CVSS 7.2 High,
+[GHSA-63mx-j37w-gh59](https://github.com/MIC-DKFZ/nnUNet/security/advisories/GHSA-63mx-j37w-gh59))
+is that file. Its description names both mechanisms the rules key on — untrusted
+issue text embedded in the agent's prompt, and `allowed_non_write_users` letting
+any logged-in user reach a command-capable agent. Against the vulnerable
+revision the rules fire on the CVE's own vector:
 
 | revision | findings |
 |---|---|
