@@ -157,18 +157,21 @@ reachable by anyone and really does grant `issues: write`, so suppressing them
 would trade a precision bug for a recall one.
 
 What changed instead is the **severity**, and the same repository supplies both
-directions of the evidence. The vulnerable revision lists
-`Bash(gh issue comment:*)` and `Bash(gh issue edit:*)` in the agent's
-`--allowedTools`. The fix leaves `issues: write` on the job — a later step posts
-the comment — and removes those two commands, leaving only `gh issue view`. The
-permissions block is identical; the agent's capability is not. So the rule now
-reads the tool allowlist, and reports **`low`** with the residual named when the
-agent has no repository-mutating command:
+directions of the evidence. This needs exact revisions, because the hardening
+took two steps and the rule is right about both of them:
 
-| revision | `issues: write` | agent may comment | severity |
+| revision | agent's `--allowedTools` | `issues: write` | severity |
 |---|---|---|---|
-| vulnerable | yes | yes | **high** |
-| hardened | yes | no | **low** |
+| `94300b49` (vulnerable) | `gh issue comment`, `gh issue edit` | yes | **high** |
+| `4e4770b0` (the fix) | `gh issue comment` only — labelling moved to a wrapper script | yes | **high** |
+| `master` | neither; a later step posts from a file the agent writes | yes | **low** |
+
+The fix commit removed `gh issue edit` and routed labels through
+`.github/scripts/safe-label.sh`, but left `Bash(gh issue comment:*)` with the
+agent. The permissions block is unchanged across all three; the capability is
+not. So the rule reads the tool allowlist, and reports **`low`** only once the
+agent has no repository-mutating command left — which is true of `master` and
+not of the fix commit.
 
 That distinction was then run across every agent workflow to hand rather than the
 one it was written for — **37 workflow files, 10 running an agent action, and

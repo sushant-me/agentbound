@@ -999,6 +999,25 @@ def test_origin_workflow_keeps_full_severity():
     assert [f.severity for f in findings] == ["high"]
 
 
+# The real allowlist from nnU-Net's fix commit `4e4770b0`, which is not the same
+# thing as its fix: labelling moved into a wrapper script and `gh issue edit` was
+# dropped, but the agent kept `gh issue comment`. It is a high-severity verdict
+# for that revision, and only a later master cleared it. Pinned because the
+# wrapper-script path is an unusual token to parse.
+NNUNET_FIX_COMMIT_ALLOWLIST = (
+    '"Read,Glob,Grep,Bash(.github/scripts/safe-label.sh:*),'
+    'Bash(gh issue comment:*),Bash(gh issue view:*),Bash(gh search issues:*),'
+    'Bash(grep:*),Bash(rg:*),Bash(ls:*)"'
+)
+
+
+def test_the_fix_commit_is_still_high_because_the_agent_can_still_comment():
+    assert _agent_has_repo_write_tool(
+        "claude_args: --allowedTools " + NNUNET_FIX_COMMIT_ALLOWLIST
+    ) is True
+
+
+
 
 
 def test_job_splitter_finds_both_jobs_and_ignores_on_block_children():
