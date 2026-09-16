@@ -36,7 +36,7 @@ side. `agentbound` scans the *framework* side, which no general tool does today.
 |---|---|---|
 | `tool-reserved-name-shadowing` | high | a reserved-name set omits a framework-owned tool the framework registers (`def <name>(`) |
 | `confirmation-gate-fails-open` | high | `inspect.signature(predicate)` filters tool args, so a generic predicate returns `False` and the gate opens |
-| `ci-agent-untrusted-issue-content` | high | a workflow runs an AI agent action **and** consumes issue or comment text — from the event payload, or fetched with `gh issue list --json ...body`. Both CI-agent rules also require that an author *without* write access can actually reach the agent: `claude-code-action` and `codex-action` refuse such an actor unless an input opts them in, while `run-gemini-cli` and `gemini-cli-action` perform no actor check at all. The precondition is per action and read from each action's source, and is evaluated per **job**, so a job gated on `author_association` does not inherit it from a public job in the same file (see *Precision* below) |
+| `ci-agent-untrusted-issue-content` | high | a workflow runs an AI agent action **and** consumes issue or comment text — from the event payload, or fetched with `gh issue list --json ...body`. Both CI-agent rules also require that an author *without* write access can actually reach the agent: `claude-code-action` and `codex-action` refuse such an actor unless an input opts them in, while `run-gemini-cli` and `gemini-cli-action` perform no actor check at all. The precondition is per action and read from each action's source, and is evaluated per **job**, so a job gated on `author_association` does not inherit it from a public job in the same file (see *Precision* below). The opt-out must also **carry a value**: both actions treat an empty one as no opt-out at all, so `allowed_non_write_users: ""` leaves the write-permission check in place |
 | `ci-agent-write-scope-on-untrusted-trigger` | high | an AI agent action runs in a job triggered by issue/comment/review events, the job grants a `write` scope, **and** an untrusted author can reach the agent. The complement of the rule above: here the untrusted text never appears in the YAML, because the agent fetches the issue itself at runtime with the token the job hands it, so no scan of the file can see it. `id-token: write` is not counted — it mints the OIDC token and is what a hardened setup uses. Evaluated per job, as above. Severity scales with the agent's tool allowlist: if it grants no repository-mutating command the grant belongs to the job's later steps, and the finding drops to `low` with the residual spelled out. A `scope: write` line counts only as a child of a `permissions:` **mapping** — the same two lines appearing as an action input, as in a credential broker's `permissions: \|`, are not a grant |
 | `ci-agent-missing-author-association` | critical | an `issues`-triggered dispatch arm with no `author_association` check while other arms have one, **and** an agent is reachable from the file — either an agent action or a call to a reusable workflow that may hold one. A repository that only labels issues, with no agent anywhere, is not reported |
 | `tool-dict-last-wins` | medium | a tool-name→tool dict assigned unconditionally while duplicates are only `logging.warning`-ed (last-wins shadowing) |
@@ -199,6 +199,28 @@ turned up two bugs in the scope matching itself, pointing opposite ways:
   across the corpus were invisible. Comments are stripped before matching now.
 
 Both guards are mutation-tested: reverting either fails exactly one test.
+
+**A third defect, in the precondition itself.** The corpus also caught the rule
+reading the opt-out as a *presence* rather than a *value*. `redpanda-data/console`
+sets `allowed_non_write_users: ""` directly above the comment *"Only org members
+with write access can trigger via @claude mentions"* — it is relying on the
+action's own check, which is the safe configuration. Both actions say so in their
+own source: `claude-code-action`'s suite asserts
+`checkWritePermissions(..., "", true) === false` under the test name *"should NOT
+bypass permission check when allowed_non_write_users is empty"*, and
+`codex-action`'s `checkActorPermissions.ts` gates the override on
+`allowUsersSpec.length > 0`. The rule was reporting that workflow, including its
+`contents: write`, as reachable by anyone. An input now has to carry a non-empty
+value to count, and a reusable workflow forwarding `${{ inputs.x }}` still counts,
+because its safety then depends on callers this file cannot see.
+
+Dropping the three fixes together took the corpus from **106 findings to 107** —
+which is the wrong way to read it. The count barely moved because the fixes
+pushed in opposite directions: the `permissions:`-mapping guard removed the four
+`astral-sh/uv` false positives, while stripping comments before matching surfaced
+eight findings that had been invisible. The count is not the measure; *which*
+findings changed is. The genuine `contents: write` set went 6 → 5, and the three
+that left were configurations that were already safe.
 
 The sweep also sizes the class, and the answer is worth stating plainly. Of 132
 repositories running an agent with the opt-out set, the great majority grant only

@@ -15,6 +15,7 @@ from agentbound.rules import (
     _job_gates_on_author_association,
     _agent_has_repo_write_tool,
     _iter_write_scopes,
+    _untrusted_author_reaches_agent,
 )
 
 # --- rule 1: reserved-name shadowing ---------------------------------------
@@ -1103,6 +1104,78 @@ def test_write_scope_shapes():
     assert _iter_write_scopes("with:\n  contents: write\n") == []
     # ...and one shallower than its key has left the block.
     assert _iter_write_scopes("  permissions:\n    issues: read\n  contents: write\n") == []
+
+
+# --- the opt-out has to carry a value ----------------------------------------
+#
+# Presence is not the question. Both actions say so in their own source:
+# claude-code-action's test/permissions.test.ts asserts
+# `checkWritePermissions(..., "", true) === false` under the name "should NOT
+# bypass permission check when allowed_non_write_users is empty", and
+# codex-action's checkActorPermissions.ts gates the override on
+# `allowUsersSpec.length > 0`. An empty value is the safe configuration.
+
+REDPANDA_EMPTY_OPTOUT_YML = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  claude:
+    # Only org members with write access can trigger via @claude mentions
+    if: github.event_name == 'issues' && contains(github.event.issue.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_bots: ""
+          allowed_non_write_users: ""
+          claude_args: --allowedTools "Bash(gh pr comment:*),Bash(gh issue view:*)"
+'''
+
+
+def test_an_empty_optout_leaves_the_actors_write_check_in_place():
+    """Regression: redpanda-data/console. That workflow sets
+    `allowed_non_write_users: ""` beside a comment saying only org members with
+    write access can trigger. It was reported as reachable by anyone, along with
+    its `contents: write`."""
+    assert not _untrusted_author_reaches_agent(REDPANDA_EMPTY_OPTOUT_YML)
+    assert rule_ci_agent_write_scope_on_untrusted_trigger(
+        "claude.yml", REDPANDA_EMPTY_OPTOUT_YML
+    ) == []
+
+
+def test_optout_values_that_do_and_do_not_opt_in():
+    base = "uses: anthropics/claude-code-action@v1\n"
+    assert not _untrusted_author_reaches_agent(base + 'allowed_non_write_users: ""\n')
+    assert not _untrusted_author_reaches_agent(base + "allowed_non_write_users: ''\n")
+    assert not _untrusted_author_reaches_agent(base + "allowed_non_write_users:\n")
+    assert not _untrusted_author_reaches_agent(
+        base + 'allowed_non_write_users: ""  # nobody\n'
+    )
+    assert _untrusted_author_reaches_agent(base + 'allowed_non_write_users: "*"\n')
+    assert _untrusted_author_reaches_agent(base + "allowed_non_write_users: alice\n")
+    assert _untrusted_author_reaches_agent(
+        base + "allowed_non_write_users: ${{ github.event.issue.user.login }}\n"
+    )
+
+
+def test_codex_allow_users_uses_the_same_empty_value_rule():
+    base = "uses: openai/codex-action@v1\n"
+    assert not _untrusted_author_reaches_agent(base + 'allow-users: ""\n')
+    assert _untrusted_author_reaches_agent(base + 'allow-users: "alice"\n')
+
+
+def test_a_reusable_workflow_passing_the_input_through_still_counts():
+    """`${{ inputs.x }}` carries a value even though it may be empty at run time.
+    The loud direction is correct: the workflow's safety then depends on every
+    caller, which a scan of this file cannot see."""
+    assert _untrusted_author_reaches_agent(
+        "uses: anthropics/claude-code-action@v1\n"
+        "allowed_non_write_users: ${{ inputs.allowed_non_write_users }}\n"
+    )
 
 
 

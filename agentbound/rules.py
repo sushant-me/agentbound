@@ -551,13 +551,44 @@ def _iter_write_scopes(text: str) -> list[tuple[int, str]]:
 #
 # An action not listed here is unknown and is treated as reachable, so a new
 # action is loud rather than silently assumed safe.
+#
+# Each entry names the inputs that opt a user in past that check. Whether the
+# input is *present* is not the question - whether it *carries a value* is. Both
+# actions say so in their own source:
+#
+#   claude-code-action  test/permissions.test.ts, "should NOT bypass permission
+#                       check when allowed_non_write_users is empty", asserts
+#                       checkWritePermissions(..., "", true) === false
+#   codex-action        src/checkActorPermissions.ts trims the input and gates
+#                       the override on `allowUsersSpec.length > 0`
+#
+# So `allowed_non_write_users: ""` leaves the check in place. That is the safe
+# configuration, and people write it deliberately - `redpanda-data/console` sets
+# it empty next to the comment "Only org members with write access can trigger
+# via @claude mentions". Matching on presence alone reported that workflow, and
+# its `contents: write`, as reachable by anyone.
 _AGENT_ACTIONS: dict[str, tuple[str, ...] | None] = {
-    "anthropics/claude-code-action": (r"^[ \t]*allowed_non_write_users[ \t]*:",),
-    "openai/codex-action": (r"^[ \t]*allow-users[ \t]*:",),
+    "anthropics/claude-code-action": ("allowed_non_write_users",),
+    "openai/codex-action": ("allow-users",),
     "google-github-actions/run-gemini-cli": None,
     "google-gemini/gemini-cli-action": None,
     "anthropics/claude-code-base-action": None,
 }
+
+
+def _input_carries_a_value(text: str, name: str) -> bool:
+    """Whether a workflow sets an input to something, rather than to nothing.
+
+    An empty string, a pair of empty quotes, or a bare key with no value are all
+    "not set" here. A value that is only a comment is not a value either.
+    """
+    pattern = re.compile(
+        r"^[ \t]*" + re.escape(name) + r"[ \t]*:[ \t]*(?P<value>[^\n#]*)",
+        re.MULTILINE,
+    )
+    return any(
+        m.group("value").strip().strip("\"'").strip() for m in pattern.finditer(text)
+    )
 
 
 def _untrusted_author_reaches_agent(text: str) -> bool:
@@ -578,7 +609,7 @@ def _untrusted_author_reaches_agent(text: str) -> bool:
         opt_outs = _AGENT_ACTIONS[name]
         if opt_outs is None:
             return True
-        if any(re.search(p, text, re.MULTILINE) for p in opt_outs):
+        if any(_input_carries_a_value(text, input_name) for input_name in opt_outs):
             return True
     return False
 
