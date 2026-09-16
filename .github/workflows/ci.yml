@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor is what pyproject.toml declares; the rest guard against
+        # regressions on current interpreters.
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e . pytest
+      - name: Test
+        run: python -m pytest tests/ -q
+      - name: CLI contract
+        # Scan the package source, which is clean, so exit code 0 is the
+        # assertion. Scanning the repository root is NOT a valid check: the
+        # rule fixtures in tests/ contain the pattern strings on purpose, so
+        # that scan finds findings and exits 1 by design.
+        run: agentbound scan agentbound
