@@ -1,0 +1,21 @@
+# A CI fixture, not a workflow this repository runs: it sits below the root, so
+# GitHub never loads it. It carries the four conditions the CI-agent rule needs,
+# so the composite action has something it must fail on.
+name: Issue Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: ${{ github.event.issue.user.login }}
+          claude_args: --allowedTools "Read,Bash(gh issue comment:*),Bash(gh issue edit:*)"
+          prompt: |
+            Triage this issue.
+            BODY: ${{ github.event.issue.body }}

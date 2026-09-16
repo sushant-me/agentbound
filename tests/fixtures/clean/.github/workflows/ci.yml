@@ -1,0 +1,16 @@
+# The negative half of the action self-test: a workflow that runs an agent with
+# no write scope and no untrusted trigger, so nothing should fire.
+name: CI
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: Summarise the last commit.

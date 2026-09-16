@@ -1,0 +1,113 @@
+name: agentbound
+description: >-
+  Detect AI-agent tool-boundary bugs in a repository: reserved-name shadowing,
+  last-wins tool dicts, fail-open confirmation gates, in-model tools that never
+  occupy their name, and CI workflows where an untrusted author can steer an
+  agent that holds a write scope.
+author: Sushant Poudel
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  path:
+    description: Repository path to scan.
+    required: false
+    default: '.'
+  fail-on:
+    description: >-
+      Lowest severity that fails the run: critical, high, medium or low. Use
+      `none` to report without ever failing. The default is `high`, because
+      this tool deliberately reports `low` and `medium` findings for the
+      residual cases - a tool pattern bounded to its target, a write scope that
+      belongs to a later non-agent step. Gating a build on those would make it
+      unusable; raising the threshold is how you say which ones matter to you.
+    required: false
+    default: high
+  summary:
+    description: Write a findings summary to the job summary.
+    required: false
+    default: 'true'
+
+outputs:
+  findings:
+    description: Number of findings reported, at any severity.
+  exit-code:
+    description: 'The scanner exit code: 1 when a finding met `fail-on`, else 0.'
+
+runs:
+  using: composite
+  steps:
+    - name: Install agentbound
+      shell: bash
+      # A venv rather than `pip install` into the runner's Python: the runner
+      # image changes, and a PEP-668 externally-managed environment would turn
+      # that into a confusing setup failure rather than a scan.
+      run: |
+        python3 -m venv "$RUNNER_TEMP/agentbound-venv"
+        "$RUNNER_TEMP/agentbound-venv/bin/pip" install --quiet --disable-pip-version-check "${{ github.action_path }}"
+        echo "$RUNNER_TEMP/agentbound-venv/bin" >> "$GITHUB_PATH"
+
+    - name: Scan
+      id: scan
+      shell: bash
+      env:
+        AGENTBOUND_PATH: ${{ inputs.path }}
+        AGENTBOUND_FAIL_ON: ${{ inputs.fail-on }}
+        AGENTBOUND_SUMMARY: ${{ inputs.summary }}
+      run: |
+        set +e
+        agentbound scan "$AGENTBOUND_PATH" --json --fail-on "$AGENTBOUND_FAIL_ON" \
+          > "$RUNNER_TEMP/agentbound.json"
+        code=$?
+        set -e
+
+        count=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" \
+          "$RUNNER_TEMP/agentbound.json")
+
+        # The report goes to the log whether or not the step is about to fail,
+        # so a red run still shows what tripped it.
+        agentbound scan "$AGENTBOUND_PATH" --fail-on none > "$RUNNER_TEMP/agentbound.txt" || true
+        cat "$RUNNER_TEMP/agentbound.txt"
+
+        {
+          echo "findings=$count"
+          echo "exit-code=$code"
+        } >> "$GITHUB_OUTPUT"
+
+        if [ "$AGENTBOUND_SUMMARY" = "true" ]; then
+          python3 - "$RUNNER_TEMP/agentbound.json" \
+            "$AGENTBOUND_FAIL_ON" "$code" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+        import json, sys
+
+        findings = json.load(open(sys.argv[1]))
+        threshold, code = sys.argv[2], sys.argv[3]
+        ordering = ["critical", "high", "medium", "low", "info"]
+
+        def at_or_above(f):
+            if threshold == "none":
+                return False
+            try:
+                return ordering.index(f["severity"]) <= ordering.index(threshold)
+            except ValueError:
+                return True
+
+        gating = [f for f in findings if at_or_above(f)]
+        print("## agentbound\n")
+        print(f"{len(findings)} finding(s); {len(gating)} at or above `{threshold}`.")
+        print(f"Exit code: `{code}`.\n")
+        if findings:
+            print("| severity | location | rule |")
+            print("|---|---|---|")
+            for f in findings:
+                print(f"| `{f['severity']}` | `{f['path']}:{f['line']}` | `{f['rule']}` |")
+            print()
+            for f in findings:
+                print(f"<details><summary><code>{f['rule']}</code> — {f['path']}:{f['line']}</summary>\n")
+                print(f["message"] + "\n")
+                print("</details>\n")
+        PY
+        fi
+
+        exit "$code"

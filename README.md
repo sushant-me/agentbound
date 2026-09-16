@@ -61,9 +61,50 @@ docstrings).
 pip install -e .
 agentbound scan /path/to/repo
 agentbound scan /path/to/repo --json
+agentbound scan /path/to/repo --fail-on high   # CI gate
 ```
 
-Exit code is `1` when findings exist, so it can gate CI.
+`--fail-on` sets the lowest severity that produces a non-zero exit. The default
+is `low`, which preserves the original contract — **exit `1` when a finding
+exists**. That default is deliberate and it is also not what you want in CI: this
+tool reports `low` and `medium` findings *on purpose*, for the residual cases
+where the architecture is already right (a tool pattern bounded to its target, a
+write scope that belongs to a later non-agent step). Gating a build on those
+makes the tool unusable as a gate, which is why the threshold exists.
+
+| `--fail-on` | fails on |
+|---|---|
+| `high` *(recommended for CI)* | `critical`, `high` |
+| `medium` | `critical`, `high`, `medium` |
+| `low` *(default)* | any finding — the original contract |
+| `none` | never; still reports, so it is not a silencer |
+
+Exit code `2` is reserved for a path that does not exist, so a typo is never
+mistaken for a clean scan. It is worth stating because it was **not** implemented
+until `0.1.9`: a missing directory walked nothing, found nothing, and exited `0`,
+and so did a single-file path, because `rglob` over a file yields no files. Both
+are the same failure this tool exists to report, in the tool itself, and both now
+have tests and a CI step.
+
+## Use it as a GitHub Action
+
+```yaml
+- uses: sushant-me/agentbound@v0.1.9
+  with:
+    path: .
+    fail-on: high
+```
+
+It installs into a venv, writes a findings table to the job summary with each
+message in a collapsible block, and exposes `findings` (count at any severity)
+and `exit-code` as step outputs, so a later step can act on the result without
+parsing the log.
+
+The `action` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) tests
+it through that same interface — a vulnerable fixture that must fail the run and
+a clean one that must pass at the lowest threshold. Unit tests never execute
+`action.yml`, so a broken install step would otherwise be invisible until a user
+hit it.
 
 ## Verify against the real findings
 

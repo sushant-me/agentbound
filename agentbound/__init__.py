@@ -5,4 +5,4 @@ last-wins tool registration, fail-open confirmation gates, and unauthenticated
 agent CI dispatch. Each rule is grounded in a real, disclosed finding.
 """
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"

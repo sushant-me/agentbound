@@ -31,9 +31,24 @@ def _iter_files(root: Path):
 
 
 def scan(root: str | Path) -> list[Finding]:
+    """Scan a directory (or a single file) and return its findings.
+
+    A single file is scanned as itself. `rglob` over a file path yields nothing,
+    so without this branch `agentbound scan somefile.py` reported a clean result
+    by inspecting nothing at all - the failure this whole project is about.
+    Callers that need to distinguish "nothing found" from "nothing read" should
+    check the path themselves; `cli.main` does, and exits 2.
+    """
     root = Path(root)
+    if root.is_file():
+        paths = [root]
+        base = root.parent
+    else:
+        paths = list(_iter_files(root))
+        base = root
+
     files: dict[str, str] = {}
-    for path in _iter_files(root):
+    for path in paths:
         if path.suffix not in _SCAN_EXTS:
             continue
         try:
@@ -43,7 +58,7 @@ def scan(root: str | Path) -> list[Finding]:
         except OSError:
             continue
         try:
-            rel = str(path.relative_to(root))
+            rel = str(path.relative_to(base))
         except ValueError:
             rel = str(path)
         files[rel] = text

@@ -46,3 +46,75 @@ jobs:
             echo "expected a non-zero exit when findings exist"; exit 1
           fi
           echo "exit code 1 on findings: ok"
+
+      - name: CLI contract - --fail-on raises the threshold
+        # `low` and `medium` findings are reported on purpose, so a default that
+        # failed on them would make the tool unusable as a gate. This asserts
+        # both directions: the medium fixture still fails at `medium`, and stops
+        # failing at `high`.
+        run: |
+          agentbound scan /tmp/agentbound-dirty --fail-on medium
+          if agentbound scan /tmp/agentbound-dirty --fail-on high; then
+            echo "--fail-on high correctly ignored a medium finding"
+          else
+            echo "--fail-on high did not raise the threshold"; exit 1
+          fi
+          if agentbound scan /tmp/agentbound-dirty --fail-on none; then
+            echo "--fail-on none never fails: ok"
+          else
+            echo "--fail-on none still failed"; exit 1
+          fi
+
+      - name: CLI contract - an unreadable input exits 2, not 0
+        # The third arm of the documented contract, and the one that was never
+        # implemented: a typo'd path used to walk nothing, find nothing, and
+        # exit 0. A misspelled directory must never read as a clean scan.
+        run: |
+          set +e
+          agentbound scan /nonexistent/agentbound-path >/dev/null 2>&1
+          code=$?
+          set -e
+          test "$code" = "2" || { echo "missing path exited $code, want 2"; exit 1; }
+          echo "unreadable input exits 2: ok"
+
+      - name: CLI contract - a single file is scanned, not ignored
+        # rglob over a file path yields nothing, so this used to report clean by
+        # reading nothing at all.
+        run: |
+          printf 'import logging\n\n\ndef register(tools_dict, tool):\n    logging.warning("Duplicate tool name %%r", tool.name)\n    tools_dict[tool.name] = tool\n' > /tmp/agentbound-one.py
+          if agentbound scan /tmp/agentbound-one.py; then
+            echo "scanning a single file found nothing"; exit 1
+          fi
+          echo "single-file scan works: ok"
+
+  action:
+    # End-to-end test of the composite action, through the same interface a user
+    # gets. A scanner action that is broken in its install step is invisible to
+    # the unit tests above, which never exercise action.yml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The vulnerable fixture must fail the run
+        id: vulnerable
+        continue-on-error: true
+        uses: ./
+        with:
+          path: tests/fixtures/vulnerable
+          fail-on: high
+
+      - name: Assert it failed, and reported what it found
+        run: |
+          test "${{ steps.vulnerable.outcome }}" = "failure" \
+            || { echo "action passed on a vulnerable fixture"; exit 1; }
+          test "${{ steps.vulnerable.outputs.exit-code }}" = "1" \
+            || { echo "exit-code output was ${{ steps.vulnerable.outputs.exit-code }}, want 1"; exit 1; }
+          test "${{ steps.vulnerable.outputs.findings }}" -ge 1 \
+            || { echo "findings output was ${{ steps.vulnerable.outputs.findings }}"; exit 1; }
+          echo "vulnerable fixture failed the run with ${{ steps.vulnerable.outputs.findings }} finding(s): ok"
+
+      - name: The clean fixture must pass, at the lowest threshold
+        uses: ./
+        with:
+          path: tests/fixtures/clean
+          fail-on: low
