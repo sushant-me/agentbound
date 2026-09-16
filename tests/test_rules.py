@@ -1148,24 +1148,102 @@ def test_an_empty_optout_leaves_the_actors_write_check_in_place():
 
 
 def test_optout_values_that_do_and_do_not_opt_in():
+    """A named account is not an opt-out for *any* author.
+
+    This changed in 0.1.6: `allowed_non_write_users: alice` used to count as
+    reachable-by-anyone. The action bypasses its check for `alice` and no one
+    else, so an arbitrary GitHub user still cannot trigger the run, and the class
+    this rule exists for does not apply. The maintainer named that account.
+    """
     base = "uses: anthropics/claude-code-action@v1\n"
+    # Not opt-outs: nothing, or a named account.
     assert not _untrusted_author_reaches_agent(base + 'allowed_non_write_users: ""\n')
     assert not _untrusted_author_reaches_agent(base + "allowed_non_write_users: ''\n")
     assert not _untrusted_author_reaches_agent(base + "allowed_non_write_users:\n")
     assert not _untrusted_author_reaches_agent(
         base + 'allowed_non_write_users: ""  # nobody\n'
     )
+    assert not _untrusted_author_reaches_agent(base + "allowed_non_write_users: alice\n")
+    assert not _untrusted_author_reaches_agent(
+        base + "allowed_non_write_users: alice, bob\n"
+    )
+    # Opt-outs: a wildcard, or a value the event computes.
     assert _untrusted_author_reaches_agent(base + 'allowed_non_write_users: "*"\n')
-    assert _untrusted_author_reaches_agent(base + "allowed_non_write_users: alice\n")
+    assert _untrusted_author_reaches_agent(base + "allowed_non_write_users: alice, *\n")
+    assert _untrusted_author_reaches_agent(
+        base + "allowed_non_write_users: ${{ github.actor }}\n"
+    )
     assert _untrusted_author_reaches_agent(
         base + "allowed_non_write_users: ${{ github.event.issue.user.login }}\n"
     )
 
 
-def test_codex_allow_users_uses_the_same_empty_value_rule():
+def test_codex_allow_users_uses_the_same_semantics():
     base = "uses: openai/codex-action@v1\n"
     assert not _untrusted_author_reaches_agent(base + 'allow-users: ""\n')
-    assert _untrusted_author_reaches_agent(base + 'allow-users: "alice"\n')
+    assert not _untrusted_author_reaches_agent(base + 'allow-users: "MathiasGruber"\n')
+    assert _untrusted_author_reaches_agent(base + 'allow-users: "*"\n')
+
+
+# --- the write scope's job has to be the agent's job -------------------------
+#
+# Half of every high-severity finding this rule produced across a 197-file
+# corpus was a write scope on a job that runs no agent. The shape is the
+# recommended one: a read-only job gathers with the agent, a second job applies
+# the result. The agent never receives the second job's token, so "an untrusted
+# author can steer an agent that holds write access" is simply not true of it.
+
+SPLIT_JOBS_YML = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  gather-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: openai/codex-action@v1
+        with:
+          allow-users: "*"
+  apply-labels:
+    needs: gather-labels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: console.log("apply the labels the agent gathered")
+'''
+
+# The control: the same write scope, moved into the job that runs the agent.
+JOINED_JOBS_YML = SPLIT_JOBS_YML.replace(
+    """    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: console.log("apply the labels the agent gathered")
+""",
+    "    steps:\n      - uses: openai/codex-action@v1\n"
+    "        with:\n          allow-users: \"*\"\n",
+)
+assert "allow-users" in JOINED_JOBS_YML
+assert JOINED_JOBS_YML.count("codex-action") == 2
+
+
+def test_a_write_scope_on_a_job_without_the_agent_is_not_reported():
+    """Regression: dataplat/dbatools and the codex labeler templates."""
+    assert rule_ci_agent_write_scope_on_untrusted_trigger(
+        "codex.yml", SPLIT_JOBS_YML
+    ) == []
+
+
+def test_the_control_moves_the_agent_into_the_write_job_and_fires():
+    findings = rule_ci_agent_write_scope_on_untrusted_trigger(
+        "codex.yml", JOINED_JOBS_YML
+    )
+    assert [f.severity for f in findings] == ["high"]
 
 
 def test_a_reusable_workflow_passing_the_input_through_still_counts():

@@ -36,8 +36,8 @@ side. `agentbound` scans the *framework* side, which no general tool does today.
 |---|---|---|
 | `tool-reserved-name-shadowing` | high | a reserved-name set omits a framework-owned tool the framework registers (`def <name>(`) |
 | `confirmation-gate-fails-open` | high | `inspect.signature(predicate)` filters tool args, so a generic predicate returns `False` and the gate opens |
-| `ci-agent-untrusted-issue-content` | high | a workflow runs an AI agent action **and** consumes issue or comment text — from the event payload, or fetched with `gh issue list --json ...body`. Both CI-agent rules also require that an author *without* write access can actually reach the agent: `claude-code-action` and `codex-action` refuse such an actor unless an input opts them in, while `run-gemini-cli` and `gemini-cli-action` perform no actor check at all. The precondition is per action and read from each action's source, and is evaluated per **job**, so a job gated on `author_association` does not inherit it from a public job in the same file (see *Precision* below). The opt-out must also **carry a value**: both actions treat an empty one as no opt-out at all, so `allowed_non_write_users: ""` leaves the write-permission check in place |
-| `ci-agent-write-scope-on-untrusted-trigger` | high | an AI agent action runs in a job triggered by issue/comment/review events, the job grants a `write` scope, **and** an untrusted author can reach the agent. The complement of the rule above: here the untrusted text never appears in the YAML, because the agent fetches the issue itself at runtime with the token the job hands it, so no scan of the file can see it. `id-token: write` is not counted — it mints the OIDC token and is what a hardened setup uses. Evaluated per job, as above. Severity scales with the agent's tool allowlist: if it grants no repository-mutating command the grant belongs to the job's later steps, and the finding drops to `low` with the residual spelled out. A `scope: write` line counts only as a child of a `permissions:` **mapping** — the same two lines appearing as an action input, as in a credential broker's `permissions: \|`, are not a grant |
+| `ci-agent-untrusted-issue-content` | high | a workflow runs an AI agent action **and** consumes issue or comment text — from the event payload, or fetched with `gh issue list --json ...body`. Both CI-agent rules also require that an author *without* write access can actually reach the agent: `claude-code-action` and `codex-action` refuse such an actor unless an input opts them in, while `run-gemini-cli` and `gemini-cli-action` perform no actor check at all. The precondition is per action and read from each action's source, and is evaluated per **job**, so a job gated on `author_association` does not inherit it from a public job in the same file (see *Precision* below). The opt-out must also **opt in more than a named account**: both actions bypass their check only for the accounts listed, so `allow-users: "MathiasGruber"` leaves an arbitrary GitHub user unable to reach the agent. What reaches anyone is a `*` or a value the *event* computes — `${{ github.event.issue.user.login }}` is the author of the issue the attacker just opened, which is the CVE's vector. An empty value is likewise no opt-out: `allowed_non_write_users: ""` leaves the write-permission check in place |
+| `ci-agent-write-scope-on-untrusted-trigger` | high | an AI agent action runs in a job triggered by issue/comment/review events, the job grants a `write` scope, **and** an untrusted author can reach the agent. The complement of the rule above: here the untrusted text never appears in the YAML, because the agent fetches the issue itself at runtime with the token the job hands it, so no scan of the file can see it. `id-token: write` is not counted — it mints the OIDC token and is what a hardened setup uses. Evaluated per job, as above. Severity scales with the agent's tool allowlist: if it grants no repository-mutating command the grant belongs to the job's later steps, and the finding drops to `low` with the residual spelled out. A `scope: write` line counts only as a child of a `permissions:` **mapping** — the same two lines appearing as an action input, as in a credential broker's `permissions: \|`, are not a grant. And the grant must be on the job that **runs the agent**: a read-only agent job beside a `publish`/`apply-labels` job holding `issues: write` is the recommended architecture, and the agent never receives that token |
 | `ci-agent-missing-author-association` | critical | an `issues`-triggered dispatch arm with no `author_association` check while other arms have one, **and** an agent is reachable from the file — either an agent action or a call to a reusable workflow that may hold one. A repository that only labels issues, with no agent anywhere, is not reported |
 | `tool-dict-last-wins` | medium | a tool-name→tool dict assigned unconditionally while duplicates are only `logging.warning`-ed (last-wins shadowing) |
 | `tool-built-in-silent-replace` | high | a callable tool registers `toolsDict[name] = this` after a duplicate throw gated on `!isInModelTool(...)`, silently displacing a built-in |
@@ -221,6 +221,28 @@ pushed in opposite directions: the `permissions:`-mapping guard removed the four
 eight findings that had been invisible. The count is not the measure; *which*
 findings changed is. The genuine `contents: write` set went 6 → 5, and the three
 that left were configurations that were already safe.
+
+**Then two more, and this pair was worth half the rule's output.** Splitting the
+write scope from the agent was invisible to every earlier check because
+`_untrusted_author_reaches_agent` is evaluated once per **file**, while the
+`write` scope is a property of a **job**. So a read-only job that gathers with
+the agent, plus a second job that applies the result, was reported on the second
+job's scope — the arrangement that is the *point* of the split. Of 107
+high-severity findings in the corpus, **53 were this**, including
+`dataplat/dbatools` and every copy of the codex labeler template. The grant must
+now be on the job that runs the agent; a reusable-workflow call still counts,
+since the agent may be one file away.
+
+The fifth is the same confusion one level down, in the opt-out's *meaning*:
+`allow-users: "MathiasGruber"` names an account, and the action bypasses its
+check for that account and no other. What reaches an arbitrary author is a `*` or
+a value the event computes. That dropped `studie-tech/TheNinjaRPG`, and the
+`contents: write` set is now **3**, all with the agent in the same job.
+
+**In total: 107 → 47 write-scope findings, 50 → 43 untrusted-content, and 6 → 3
+`contents: write`.** Everything removed was a configuration that was safe, and
+the direction of the error was always the same — the rule was reporting the
+recommended architecture as the vulnerability.
 
 The sweep also sizes the class, and the answer is worth stating plainly. Of 132
 repositories running an agent with the opt-out set, the great majority grant only

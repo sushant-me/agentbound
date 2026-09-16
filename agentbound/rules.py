@@ -576,19 +576,37 @@ _AGENT_ACTIONS: dict[str, tuple[str, ...] | None] = {
 }
 
 
-def _input_carries_a_value(text: str, name: str) -> bool:
-    """Whether a workflow sets an input to something, rather than to nothing.
+def _input_opts_in_any_author(text: str, name: str) -> bool:
+    """Whether an input lets an author *without* write access drive the agent.
 
-    An empty string, a pair of empty quotes, or a bare key with no value are all
-    "not set" here. A value that is only a comment is not a value either.
+    Three things are not an opt-out, and each was being counted as one:
+
+    * **Empty.** `allowed_non_write_users: ""` leaves the check in place. Both
+      actions say so - claude-code-action asserts
+      `checkWritePermissions(..., "", true) === false`, and codex-action gates on
+      `allowUsersSpec.length > 0`.
+    * **A literal list.** `allow-users: "MathiasGruber"` bypasses the check for
+      that account and no other. An arbitrary GitHub user is not that account, so
+      the class this rule is about does not apply. The maintainer named them.
+    * **A value that is only a comment.**
+
+    What does reach anyone is a `*` and a value the *event* computes.
+    `${{ github.event.issue.user.login }}` is the author of the very issue the
+    attacker just opened - that is the CVE-2026-44246 vector - and
+    `${{ github.actor }}` is whoever triggered the run. A `${{ inputs.x }}` is
+    unknown rather than literal, so it stays in the loud direction.
     """
     pattern = re.compile(
         r"^[ \t]*" + re.escape(name) + r"[ \t]*:[ \t]*(?P<value>[^\n#]*)",
         re.MULTILINE,
     )
-    return any(
-        m.group("value").strip().strip("\"'").strip() for m in pattern.finditer(text)
-    )
+    for match in pattern.finditer(text):
+        value = match.group("value").strip().strip("\"'").strip()
+        if not value:
+            continue
+        if "${{" in value or any(p.strip() == "*" for p in value.split(",")):
+            return True
+    return False
 
 
 def _untrusted_author_reaches_agent(text: str) -> bool:
@@ -609,7 +627,7 @@ def _untrusted_author_reaches_agent(text: str) -> bool:
         opt_outs = _AGENT_ACTIONS[name]
         if opt_outs is None:
             return True
-        if any(_input_carries_a_value(text, input_name) for input_name in opt_outs):
+        if any(_input_opts_in_any_author(text, n) for n in opt_outs):
             return True
     return False
 
@@ -744,6 +762,31 @@ def _agent_has_repo_write_tool(job_text: str) -> bool | None:
     return any(_MUTATING_AGENT_COMMAND_RE.search(a) for a in allowlists)
 
 
+def _job_runs_the_agent(job_text: str) -> bool:
+    """Whether this job is the one that runs (or delegates) the agent.
+
+    A job-level `write` grant is a token *that job's steps* receive. An agent in
+    a different job never holds it, so "an untrusted author can steer an agent
+    that holds write access" is not true of it.
+
+    That separation is the recommended architecture, not an accident. The common
+    shape is a read-only job that gathers with the agent, then a second job that
+    applies labels or posts the comment:
+
+        gather-labels   agent, contents: read
+        apply-labels    no agent, issues: write
+
+    Reporting `apply-labels` because the *file* contains an agent was half of
+    every high-severity finding this rule produced across a 197-file corpus.
+    A reusable-workflow call counts, because the agent may be one file away and
+    this file cannot see it.
+    """
+    return bool(
+        _AI_AGENT_ACTION_RE.search(job_text)
+        or _REUSABLE_WORKFLOW_RE.search(job_text)
+    )
+
+
 def rule_ci_agent_write_scope_on_untrusted_trigger(
     path: str, text: str
 ) -> list[Finding]:
@@ -805,6 +848,10 @@ def rule_ci_agent_write_scope_on_untrusted_trigger(
     jobs = _iter_jobs(text)
     for line, scope in _iter_write_scopes(text):
         job = _job_containing(jobs, line)
+        if job is not None and not _job_runs_the_agent(job[3]):
+            # The grant belongs to a different job than the agent's. Its token
+            # never reaches the model, which is the point of splitting them.
+            continue
         if job is not None and _job_gates_on_author_association(job[3]):
             # The message below prescribes "gate the job on author_association";
             # this job already does. An untrusted author cannot reach it, so the
