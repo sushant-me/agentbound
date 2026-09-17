@@ -1801,3 +1801,45 @@ def test_tool_dict_last_wins_ignores_warnings_that_are_not_about_duplicates():
     for name, source in cases.items():
         findings = rule_tool_dict_last_wins("llm_request.py", source)
         assert findings == [], f"{name} was reported: {findings[0].message}"
+
+
+# --- the silent replacement is a shape, not two names -----------------------
+#
+# The dict had to be called `toolsDict` and the exemption predicate had to be one
+# of four hardcoded names. Writing `toolMap`, or naming the check
+# `isReservedTool`, is behaviour-preserving and made the finding disappear.
+
+def test_ts_builtin_tool_silent_replace_survives_renaming():
+    renamed = (BASE_TOOL_TS
+               .replace("toolsDict", "toolMap")
+               .replace("isInModelTool", "isReservedTool"))
+    findings = rule_ts_builtin_tool_silent_replace("base_tool.ts", renamed)
+    assert any(f.rule == "tool-built-in-silent-replace" for f in findings), (
+        "renaming the dict and the guard hid the silent replacement"
+    )
+
+
+def test_ts_builtin_tool_silent_replace_requires_the_whole_shape():
+    cases = {
+        "no duplicate error": (
+            "async processLlmRequest({llmRequest}: T): Promise<void> {\n"
+            "    if (!isInModelTool(name)) { doSomething(name); }\n"
+            "    llmRequest.toolsDict[name] = this;\n"
+            "}\n"
+        ),
+        "guard is not negated": (
+            "async processLlmRequest({llmRequest}: T): Promise<void> {\n"
+            "    if (isInModelTool(name)) { throw new Error(`Duplicate tool name`); }\n"
+            "    llmRequest.toolsDict[name] = this;\n"
+            "}\n"
+        ),
+        "dict is not a tool registry": (
+            "async processLlmRequest({llmRequest}: T): Promise<void> {\n"
+            "    if (!valid(name)) { throw new Error(`Duplicate key`); }\n"
+            "    llmRequest.byName[name] = this;\n"
+            "}\n"
+        ),
+    }
+    for name, source in cases.items():
+        findings = rule_ts_builtin_tool_silent_replace("base_tool.ts", source)
+        assert findings == [], f"{name} was reported: {findings[0].message}"

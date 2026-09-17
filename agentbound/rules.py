@@ -286,12 +286,16 @@ def rule_tool_dict_last_wins(path: str, text: str) -> list[Finding]:
     return findings
 
 
+# A tool registry is identified by its name containing "tool" (the same test the
+# Python rule applies to `tools_dict`), and the exemption by the *shape* of the
+# guard rather than by what the predicate is called. Both were hardcoded - the
+# dict had to be `toolsDict` and the predicate one of four names - so writing
+# `toolMap` or naming the check `isReservedTool` made the silent replacement
+# invisible.
 _TS_TOOLDICT_ASSIGN_RE = re.compile(
-    r"(?:request\.llmRequest\.)?toolsDict\s*\[\s*[^\]]+?\s*\]\s*=\s*"
+    r"(?:[A-Za-z_$][\w$]*\.)*(?P<dict>[A-Za-z_$][\w$]*)\s*\[\s*[^\]]+?\s*\]\s*=\s*"
 )
-_TS_DUP_GUARD_EXEMPT_RE = re.compile(
-    r"!\s*(?:isInModelTool|isBuiltInTool|isInModel|isBuiltIn)\s*\("
-)
+_TS_DUP_GUARD_EXEMPT_RE = re.compile(r"!\s*[A-Za-z_$][\w$]*\s*\(")
 
 
 def rule_ts_builtin_tool_silent_replace(path: str, text: str) -> list[Finding]:
@@ -310,6 +314,8 @@ def rule_ts_builtin_tool_silent_replace(path: str, text: str) -> list[Finding]:
     if not _TS_DUP_GUARD_EXEMPT_RE.search(text):
         return findings
     for m in _TS_TOOLDICT_ASSIGN_RE.finditer(text):
+        if "tool" not in m.group("dict").lower():
+            continue
         line = text.count("\n", 0, m.start()) + 1
         findings.append(
             Finding(
