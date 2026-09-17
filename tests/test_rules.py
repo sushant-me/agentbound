@@ -1467,3 +1467,96 @@ def test_ungated_text_still_reports_no_job_rather_than_a_gate():
     assert _iter_jobs("some: yaml\n") == []
     assert _job_containing([], 7) is None
 
+
+
+# --- untrusted-author events: one payload field, several events -------------
+#
+# `github.event.comment.body` is populated by `issue_comment`,
+# `discussion_comment` and `pull_request_review_comment`; `github.event.issue.body`
+# is populated by `issues` and also by `issue_comment`, whose payload carries the
+# issue the comment is on. Both were keyed to a single event, so a workflow whose
+# trigger was the *other* event in the set was treated as though the path could
+# not be populated and no rule fired.
+
+_UNTRUSTED_AUTHOR_WORKFLOW = '''\
+on:
+  {trigger}:
+    types: [created]
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: "Context: ${{{{ {payload} }}}}"
+'''
+
+
+def _scan(text: str):
+    return rule_ci_agent_untrusted_issue_content("x.yml", text) + (
+        rule_ci_agent_write_scope_on_untrusted_trigger("x.yml", text)
+    )
+
+
+def test_discussion_comment_is_an_untrusted_author_event():
+    """A discussion comment is written by anyone, like an issue comment."""
+    for payload in ("github.event.comment.body",):
+        text = _UNTRUSTED_AUTHOR_WORKFLOW.format(
+            trigger="discussion_comment", payload=payload
+        )
+        found = _scan(text)
+        assert found, f"discussion_comment + {payload} produced no findings"
+
+
+def test_comment_body_fires_on_every_event_that_populates_it():
+    for trigger in (
+        "issue_comment",
+        "discussion_comment",
+        "pull_request_review_comment",
+    ):
+        text = _UNTRUSTED_AUTHOR_WORKFLOW.format(
+            trigger=trigger, payload="github.event.comment.body"
+        )
+        assert any(
+            f.rule == "ci-agent-untrusted-issue-content" for f in _scan(text)
+        ), f"{trigger} + comment.body produced no untrusted-content finding"
+
+
+def test_issue_body_fires_on_issue_comment_too():
+    """`issue_comment`'s payload includes the issue the comment is on."""
+    text = _UNTRUSTED_AUTHOR_WORKFLOW.format(
+        trigger="issue_comment", payload="github.event.issue.body"
+    )
+    assert any(
+        f.rule == "ci-agent-untrusted-issue-content" for f in _scan(text)
+    ), "issue_comment + issue.body produced no untrusted-content finding"
+
+
+def test_payload_paths_still_do_not_fire_on_unrelated_triggers():
+    """Guarding the widening: the event set must still exclude what it should.
+
+    `push` populates neither `github.event.issue.body` nor
+    `github.event.comment.body`, so a workflow triggered only by a push is not
+    an input path and neither rule should fire on the expression alone.
+    """
+    for payload in ("github.event.issue.body", "github.event.comment.body"):
+        text = '''\
+on:
+  push:
+    branches: [main]
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: "Context: ${{ %s }}"
+''' % payload
+        found = [f for f in _scan(text) if f.rule == "ci-agent-untrusted-issue-content"]
+        assert not found, f"push + {payload} wrongly produced {found}"

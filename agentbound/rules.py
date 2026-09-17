@@ -421,16 +421,29 @@ _AI_AGENT_ACTION_RE = re.compile(
 # (label, pattern, requires_event). `requires_event` names the trigger that has
 # to be present for the payload to exist at all: on a `schedule`-only workflow
 # `github.event.issue` is empty, so flagging it would be a false positive.
-_UNTRUSTED_ISSUE_INPUTS: list[tuple[str, re.Pattern[str], str | None]] = [
+# The third element is the set of events whose payload actually populates the
+# path. It is a set because one payload field is carried by several events:
+#
+#   github.event.issue.body    -> `issues`, and also `issue_comment`, whose
+#                                 payload includes the issue the comment is on
+#   github.event.comment.body  -> `issue_comment`, `discussion_comment` and
+#                                 `pull_request_review_comment`
+#
+# Requiring a single event meant a workflow whose trigger was the *other* event
+# in the set was treated as though the path could not be populated, and the rule
+# stayed silent. Found by scanning workflows that differed only in the trigger:
+# `issue_comment` plus `github.event.issue.body` produced nothing, and so did
+# `discussion_comment` plus `github.event.comment.body`.
+_UNTRUSTED_ISSUE_INPUTS: list[tuple[str, re.Pattern[str], frozenset[str] | None]] = [
     (
         "the issue body from the event payload",
         re.compile(r"github\.event\.issue\.body"),
-        "issues",
+        frozenset({"issues", "issue_comment"}),
     ),
     (
         "comment text from the event payload",
         re.compile(r"github\.event\.comment\.body"),
-        "issue_comment",
+        frozenset({"issue_comment", "discussion_comment", "pull_request_review_comment"}),
     ),
     (
         "issue text fetched with `gh issue list --json ...body`",
@@ -449,9 +462,18 @@ _ON_BLOCK_RE = re.compile(r"^['\"]?on['\"]?\s*:(.*)$", re.MULTILINE)
 
 # Events whose payload text is authored by whoever opened the issue, comment or
 # review - i.e. by anyone, on a public repository.
+#
+# `discussion_comment` belongs here for the same reason as `issue_comment`: the
+# comment body is written by any user who can see the repository, and it reaches
+# the agent through the same `github.event.comment.body`. Leaving it out meant a
+# workflow triggered only by a discussion comment was reported by neither
+# CI-agent rule, while the identical workflow triggered by `issue_comment` was
+# reported twice. Found by scanning three files that differed only in the
+# trigger.
 _UNTRUSTED_AUTHOR_EVENTS = frozenset({
     "issues",
     "issue_comment",
+    "discussion_comment",
     "pull_request_review",
     "pull_request_review_comment",
 })
@@ -1083,7 +1105,7 @@ def rule_ci_agent_untrusted_issue_content(path: str, text: str) -> list[Finding]
 
     seen: set[tuple[int, str]] = set()
     for label, pattern, requires_event in _UNTRUSTED_ISSUE_INPUTS:
-        if requires_event is not None and requires_event not in triggers:
+        if requires_event is not None and not (requires_event & triggers):
             # The expression is present but this workflow never fires on the
             # event that populates it, so it is not an input path.
             continue
