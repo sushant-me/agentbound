@@ -1631,3 +1631,38 @@ def test_author_gate_in_another_arm_still_fires():
         "x.yml", _AUTHOR_GATE_IN_THE_OTHER_ARM
     )
     assert findings, "the ungated issues arm was cleared by the other arm's gate"
+
+
+# --- reported line numbers come from the pattern that matched ---------------
+#
+# Both in-model rules detected with a regex that allows whitespace before the
+# paren, but computed the line with a separate literal search that did not. With
+# `setTool (` the literal found nothing and returned -1, and the newline count
+# then ran to the end of the file. The Java one was milder: a bare
+# `processLlmRequest` search also matches a mention in a comment.
+
+def test_go_line_is_the_call_not_the_end_of_file():
+    findings = rule_go_inmodel_tool_unoccupied("google_search.go", GO_GOOGLE_SEARCH)
+    assert findings and findings[0].line == 2, findings[0].line if findings else None
+
+    # The same call written with a space before the paren. The check already
+    # accepts this; the line must still be the call's.
+    spaced = GO_GOOGLE_SEARCH.replace("setTool(req,", "setTool (req,")
+    spaced_findings = rule_go_inmodel_tool_unoccupied("google_search.go", spaced)
+    assert spaced_findings, "spaced call was not reported at all"
+    assert spaced_findings[0].line == 2, (
+        f"spaced call reported at line {spaced_findings[0].line}; "
+        f"file has {GO_GOOGLE_SEARCH.count(chr(10)) + 1} lines"
+    )
+
+
+def test_java_line_is_the_call_not_an_earlier_mention():
+    findings = rule_java_inmodel_tool_unoccupied("GoogleSearchTool.java", JAVA_GOOGLE_SEARCH)
+    assert findings and findings[0].line == 1, findings[0].line if findings else None
+
+    # A javadoc that names the method before the code does. The finding belongs
+    # on the call, not on the prose.
+    with_comment = "// see processLlmRequest for the update path\n" + JAVA_GOOGLE_SEARCH
+    commented = rule_java_inmodel_tool_unoccupied("GoogleSearchTool.java", with_comment)
+    assert commented, "the call was not reported with a comment present"
+    assert commented[0].line == 2, f"reported at line {commented[0].line}, want the call on line 2"

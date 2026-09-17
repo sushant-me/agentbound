@@ -426,7 +426,12 @@ def rule_go_inmodel_tool_unoccupied(path: str, text: str) -> list[Finding]:
         return findings
     if _GO_NAME_OCCUPIED_RE.search(text):
         return findings
-    line = text.count("\n", 0, text.find("setTool(")) + 1
+    # Reported from the same pattern that detected it. These were two different
+    # matchers: the check allows whitespace between the name and the paren, while
+    # the position was a literal search for `setTool(`. With `setTool (` the
+    # literal finds nothing and returns -1, and the newline count then runs to the
+    # end of the file, pointing the finding at the last line.
+    line = text.count("\n", 0, _GO_SETTOOL_RE.search(text).start()) + 1
     findings.append(
         Finding(
             rule="tool-inmodel-name-unoccupied",
@@ -463,7 +468,11 @@ def rule_java_inmodel_tool_unoccupied(path: str, text: str) -> list[Finding]:
         return findings
     if _JAVA_APPEND_RE.search(text):
         return findings
-    line = text.count("\n", 0, text.find("processLlmRequest")) + 1
+    # Same fix as the Go rule above: the position comes from the pattern that
+    # matched, not a separate literal search. `text.find` without the paren also
+    # matches a mention inside a comment or a longer identifier, which points the
+    # finding at prose rather than at the call.
+    line = text.count("\n", 0, _JAVA_PROCESS_RE.search(text).start()) + 1
     findings.append(
         Finding(
             rule="tool-inmodel-name-unoccupied",
