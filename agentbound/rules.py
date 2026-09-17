@@ -225,9 +225,33 @@ _ISSUES_EVENT_RE = re.compile(
 _TOOL_DICT_ASSIGN_RE = re.compile(
     r"(?:self\.)?(?P<dict>[A-Za-z_]\w*)\s*\[\s*(?P<key>[^\]]+?)\s*\]\s*=\s*"
 )
-_DUP_WARN_RE = re.compile(
-    r"(?:logging|logger|self\._?logger)\.warning\(\s*[\"']([^\"']*[Dd]uplicate[^\"']*)[\"']"
+# The receiver used to be hardcoded to `logging`, `logger` or `self._logger`,
+# which missed `_LOGGER` - the `_LOGGER = logging.getLogger(__name__)`
+# convention, and the most common spelling of the module logger. The call is
+# the same one either way, so the receiver is now classified rather than listed:
+# the `logging` module, anything bound to `logging.getLogger(...)`, or any name
+# that ends in `logger` regardless of case.
+_WARN_CALL_RE = re.compile(
+    r"(?:self\.)?(?P<recv>[A-Za-z_]\w*)\.warning\(\s*[\"'](?P<msg>[^\"']*)[\"']"
 )
+_LOGGER_BINDING_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*)\s*=\s*logging\.getLogger\(")
+
+
+def _warns_about_duplicates(text: str) -> bool:
+    """Whether the file reports a duplicate through a logger.
+
+    Receiver names are classified, not enumerated: `logging`, a name bound to
+    `logging.getLogger(...)`, or any name ending in `logger` in any case.
+    """
+    bound = {"logging"}
+    bound.update(m.group("name") for m in _LOGGER_BINDING_RE.finditer(text))
+    for m in _WARN_CALL_RE.finditer(text):
+        if "duplicate" not in m.group("msg").lower():
+            continue
+        recv = m.group("recv")
+        if recv in bound or recv.lower().endswith("logger"):
+            return True
+    return False
 
 
 def rule_tool_dict_last_wins(path: str, text: str) -> list[Finding]:
@@ -240,7 +264,7 @@ def rule_tool_dict_last_wins(path: str, text: str) -> list[Finding]:
     findings: list[Finding] = []
     if not path.endswith(".py"):
         return findings
-    if not _DUP_WARN_RE.search(text):
+    if not _warns_about_duplicates(text):
         return findings
     for m in _TOOL_DICT_ASSIGN_RE.finditer(text):
         if "tool" not in m.group("dict").lower():

@@ -1749,3 +1749,55 @@ def test_confirmation_gate_widening_does_not_report_unrelated_filters():
     for name, source in cases.items():
         findings = rule_confirmation_gate_fails_open("mcp_tool.py", source)
         assert findings == [], f"{name} was reported: {findings[0].message}"
+
+
+# --- the duplicate is logged through whatever the logger is called ----------
+#
+# The receiver was hardcoded to `logging`, `logger` or `self._logger`, which
+# missed `_LOGGER` - the `_LOGGER = logging.getLogger(__name__)` convention, and
+# the most common spelling. The call is identical, so the receiver is classified
+# now rather than enumerated.
+
+def test_tool_dict_last_wins_finds_the_module_logger_convention():
+    for header, call in (
+        ("_LOGGER = logging.getLogger(__name__)\n", "_LOGGER"),
+        ("_logger = logging.getLogger(__name__)\n", "_logger"),
+        ("logger = logging.getLogger(__name__)\n", "logger"),
+        ("", "logging"),
+    ):
+        source = (
+            header +
+            "def add_tool(self, tool):\n"
+            "    if tool.name in self.tools_dict:\n"
+            f'        {call}.warning("Duplicate tool name %r", tool.name)\n'
+            "    self.tools_dict[tool.name] = tool\n"
+        )
+        findings = rule_tool_dict_last_wins("llm_request.py", source)
+        assert findings, f"logger receiver {call!r} produced no finding"
+
+
+def test_tool_dict_last_wins_ignores_warnings_that_are_not_about_duplicates():
+    cases = {
+        "not a logger": (
+            "def add_tool(self, tool):\n"
+            "    if tool.name in self.tools_dict:\n"
+            '        self.ui.warning("Duplicate tool name %r", tool.name)\n'
+            "    self.tools_dict[tool.name] = tool\n"
+        ),
+        "message is not about duplicates": (
+            "def add_tool(self, tool):\n"
+            "    if tool.name in self.tools_dict:\n"
+            '        logging.warning("Registering tool %r", tool.name)\n'
+            "    self.tools_dict[tool.name] = tool\n"
+        ),
+        "dict is not a tool dict": (
+            "def index(self, items):\n"
+            "    for tool in items:\n"
+            "        if tool.name in self.by_name:\n"
+            '            logging.warning("Duplicate name %r", tool.name)\n'
+            "        self.by_name[tool.name] = tool\n"
+        ),
+    }
+    for name, source in cases.items():
+        findings = rule_tool_dict_last_wins("llm_request.py", source)
+        assert findings == [], f"{name} was reported: {findings[0].message}"
