@@ -22,9 +22,22 @@ FRAMEWORK_TOOL_WATCHLIST = [
     "transfer_to_agent",   # google/adk-python — reserved transfer tool
 ]
 
+# A reserved-name set can be written several ways and all of them are ordinary
+# Python:
+#
+#     _RESERVED_TOOL_NAMES = frozenset({...})     # what adk-python uses
+#     _RESERVED_TOOL_NAMES = frozenset([...])
+#     _RESERVED_TOOL_NAMES = {...}
+#     _RESERVED_TOOL_NAMES = (...)
+#
+# The pattern used to require a constructor call followed by a brace literal, so
+# the other three were invisible: the set was never found, and a name missing
+# from it was never reported. The opener is captured so the body can be walked to
+# its matching closer.
 _RESERVED_NAME_RE = re.compile(
     r"(?P<assign>[A-Za-z_]\w*reserved[A-Za-z_]*)\s*=\s*"
-    r"(?:frozenset|set|list|tuple)\s*\(\s*\{",
+    r"(?:(?:frozenset|set|list|tuple)\s*\(\s*)?"
+    r"(?P<open>[{\[(])",
     re.IGNORECASE,
 )
 _STRING_LITERAL_RE = re.compile(r"[\"']([^\"']+)[\"']")
@@ -39,19 +52,30 @@ def _find_reserved_sets(text: str) -> list[tuple[int, str, set[str]]]:
     """
     results: list[tuple[int, str, set[str]]] = []
     for m in _RESERVED_NAME_RE.finditer(text):
-        start = m.end() - 1  # position of the opening '{'
+        opener = m.group("open")
+        closer = {"{": "}", "[": "]", "(": ")"}[opener]
+        start = m.end() - 1  # position of the opener
         depth = 0
         end = start
         for i in range(start, len(text)):
             c = text[i]
-            if c == "{":
+            if c == opener:
                 depth += 1
-            elif c == "}":
+            elif c == closer:
                 depth -= 1
                 if depth == 0:
                     end = i
                     break
         body = text[start:end]
+
+        # A comprehension builds its members at runtime, so what it contains
+        # cannot be read off the text. Reporting a name as "missing from" such a
+        # set would be a guess about code this rule cannot see, and the widening
+        # above made comprehensions match for the first time -- a bare `[` opener
+        # is also how a list comprehension begins.
+        if re.search(r"\bfor\b[^;\n]*\bin\b", body):
+            continue
+
         names: set[str] = set(_STRING_LITERAL_RE.findall(body))
         for a, b in _IDENTIFIER_RE.findall(body):
             names.add(a or b)

@@ -1666,3 +1666,41 @@ def test_java_line_is_the_call_not_an_earlier_mention():
     commented = rule_java_inmodel_tool_unoccupied("GoogleSearchTool.java", with_comment)
     assert commented, "the call was not reported with a comment present"
     assert commented[0].line == 2, f"reported at line {commented[0].line}, want the call on line 2"
+
+
+# --- reserved sets are written more than one way ----------------------------
+#
+# The matcher required a constructor call followed by a brace literal, which is
+# what google/adk-python happens to use. The other three spellings are equally
+# ordinary Python and were invisible: the set was never found, so a name missing
+# from it was never reported.
+
+_RESERVED_SET_FORMS = {
+    "constructor with braces": '_RESERVED_TOOL_NAMES = frozenset({\n    "transfer_to_agent",\n})',
+    "constructor with brackets": '_RESERVED_TOOL_NAMES = frozenset([\n    "transfer_to_agent",\n])',
+    "bare set literal": '_RESERVED_TOOL_NAMES = {\n    "transfer_to_agent",\n}',
+    "tuple literal": '_RESERVED_TOOL_NAMES = (\n    "transfer_to_agent",\n)',
+}
+
+_REGISTERED_TOOL = '\n\ndef set_model_response() -> str:\n    return "ok"\n'
+
+
+def test_reserved_set_spelling_does_not_hide_a_missing_name():
+    for name, header in _RESERVED_SET_FORMS.items():
+        source = header + _REGISTERED_TOOL
+        findings = rule_tool_reserved_name_shadowing({"mcp_tool.py": source})
+        assert findings, f"{name} produced no finding"
+        assert any("set_model_response" in f.message for f in findings), name
+
+
+def test_reserved_set_guards_hold_across_the_widening():
+    """Widening the matcher must not start reporting sets that are fine."""
+    cases = {
+        "name is reserved": '_RESERVED_TOOL_NAMES = {"transfer_to_agent", "set_model_response"}',
+        "set is not about tools": '_RESERVED_PATHS = {"a", "b"}',
+        "members are computed": 'NAMES = ["set_model_response"]\n_RESERVED_TOOL_NAMES = frozenset(NAMES)',
+        "members are a comprehension": '_ALL = ["a"]\n_RESERVED_TOOL_NAMES = [t for t in _ALL]',
+    }
+    for name, header in cases.items():
+        findings = rule_tool_reserved_name_shadowing({"mcp_tool.py": header + _REGISTERED_TOOL})
+        assert findings == [], f"{name} was reported: {findings[0].message}"
