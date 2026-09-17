@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .findings import Finding
+from .masking import mask
 from .rules import FILE_RULES, PROJECT_RULES
 
 # Directory names to skip while walking (deps/build/vendor noise).
@@ -61,7 +62,10 @@ def scan(root: str | Path) -> list[Finding]:
             rel = str(path.relative_to(base))
         except ValueError:
             rel = str(path)
-        files[rel] = text
+        # Only what can execute is scanned: a rule matches behaviour, and a
+        # comment or a docstring that describes an idiom is prose, not a call.
+        # Masking replaces text in place, so reported line numbers are unchanged.
+        files[rel] = mask(rel, text)
 
     findings: list[Finding] = []
     for path, text in files.items():
