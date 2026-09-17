@@ -1704,3 +1704,48 @@ def test_reserved_set_guards_hold_across_the_widening():
     for name, header in cases.items():
         findings = rule_tool_reserved_name_shadowing({"mcp_tool.py": header + _REGISTERED_TOOL})
         assert findings == [], f"{name} was reported: {findings[0].message}"
+
+
+# --- the fail-open pattern is a relation, not three variable names ----------
+#
+# The rule used to require the names `signature` and `valid_params` literally.
+# Renaming either - a change with no effect on behaviour - made the fail-open
+# invisible, so the fixture below is the same code with the names changed.
+
+def test_confirmation_gate_survives_renaming_the_variables():
+    # Rename both the binding and its uses, so the result is valid Python rather
+    # than a reference to a name that no longer exists.
+    renamed = (ADK_PY_GATE
+               .replace("signature = inspect.signature(target)", "sig = inspect.signature(target)")
+               .replace("signature.parameters", "sig.parameters")
+               .replace("valid_params", "accepted"))
+    findings = rule_confirmation_gate_fails_open("mcp_tool.py", renamed)
+    assert any(f.rule == "confirmation-gate-fails-open" for f in findings), (
+        "renaming the locals hid the fail-open"
+    )
+
+
+def test_confirmation_gate_widening_does_not_report_unrelated_filters():
+    """The link between the three pieces is required, not just their presence."""
+    cases = {
+        "no dict filter at all": (
+            "def f(predicate):\n"
+            "    sig = inspect.signature(predicate)\n"
+            "    return sig\n"
+        ),
+        "filter on something unrelated": (
+            "def f(predicate, kwargs):\n"
+            "    sig = inspect.signature(predicate)\n"
+            "    unrelated = {'a': 1}\n"
+            "    return {k: v for k, v in kwargs.items() if k in unrelated}\n"
+        ),
+        "filter not derived from the signature": (
+            "def f(cls, kwargs):\n"
+            "    sig = inspect.signature(cls)\n"
+            "    names = ['a']\n"
+            "    return {k: v for k, v in kwargs.items() if k in names}\n"
+        ),
+    }
+    for name, source in cases.items():
+        findings = rule_confirmation_gate_fails_open("mcp_tool.py", source)
+        assert findings == [], f"{name} was reported: {findings[0].message}"

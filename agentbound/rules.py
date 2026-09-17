@@ -136,12 +136,29 @@ def rule_tool_reserved_name_shadowing(files: dict[str, str]) -> list[Finding]:
     return findings
 
 
-_INSPECT_SIGNATURE_RE = re.compile(
-    r"\bsignature\s*=\s*inspect\.signature\(\s*(?P<arg>[A-Za-z_]\w*)\s*\)"
+# The signature is bound to a name, its parameters to another, and the filter
+# reads the second. Both names used to be hardcoded (`signature` and
+# `valid_params`), so renaming either - a change with no effect on behaviour -
+# made the fail-open invisible:
+#
+#     signature = inspect.signature(predicate)     # name was required
+#     valid_params = signature.parameters.keys()   # name was required
+#     {k: v for k, v in kwargs.items() if k in valid_params}
+#
+# The relation between the three is what matters, not what they are called, so
+# each link is captured and matched rather than spelled out.
+_SIG_ASSIGN_RE = re.compile(
+    r"\b(?P<var>[A-Za-z_]\w*)\s*=\s*inspect\.signature\(\s*(?P<arg>[A-Za-z_]\w*)\s*\)"
 )
-_DICT_FILTER_RE = re.compile(
-    r"\{\s*[A-Za-z_]\w*\s*:\s*[A-Za-z_]\w*\s+for\s+[A-Za-z_]\w*\s*,\s*[A-Za-z_]\w*\s+"
-    r"in\s+.*?\bif\s+[A-Za-z_]\w*\s+in\s+valid_params"
+# The parameters are often wrapped in a call - `set(signature.parameters.keys())`
+# in the code this rule generalises - so one wrapping call is allowed before the
+# attribute.
+_PARAMS_FROM_SIG_RE = re.compile(
+    r"\b(?P<valid>[A-Za-z_]\w*)\s*=\s*(?:[A-Za-z_]\w*\s*\(\s*)?"
+    r"(?P<sigvar>[A-Za-z_]\w*)\.parameters\b"
+)
+_DICT_FILTER_USING_RE = re.compile(
+    r"\{[^{}]*?\bfor\b[^{}]*?\bif\s+[A-Za-z_]\w*\s+in\s+(?P<valid>[A-Za-z_]\w*)"
 )
 
 
@@ -156,13 +173,22 @@ def rule_confirmation_gate_fails_open(path: str, text: str) -> list[Finding]:
     findings: list[Finding] = []
     if not path.endswith(".py"):
         return findings
-    if "signature.parameters" not in text:
+    if "inspect.signature(" not in text:
         return findings
-    for m in _INSPECT_SIGNATURE_RE.finditer(text):
+
+    # Which names hold a `.parameters`, per signature variable.
+    params_by_sigvar: dict[str, set[str]] = {}
+    for pm in _PARAMS_FROM_SIG_RE.finditer(text):
+        params_by_sigvar.setdefault(pm.group("sigvar"), set()).add(pm.group("valid"))
+
+    # Which names a dict comprehension filters on.
+    filtered_on = {fm.group("valid") for fm in _DICT_FILTER_USING_RE.finditer(text)}
+
+    for m in _SIG_ASSIGN_RE.finditer(text):
         # Skip when the inspected object is a fixed class/module (e.g.
         # inspect.signature(SomeClass)); only flag when it is a callable
         # parameter such as `target` / `predicate`.
-        if not _DICT_FILTER_RE.search(text):
+        if not (params_by_sigvar.get(m.group("var"), set()) & filtered_on):
             continue
         line = text.count("\n", 0, m.start()) + 1
         findings.append(
