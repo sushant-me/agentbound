@@ -1560,3 +1560,74 @@ jobs:
 ''' % payload
         found = [f for f in _scan(text) if f.rule == "ci-agent-untrusted-issue-content"]
         assert not found, f"push + {payload} wrongly produced {found}"
+
+
+# --- author_association: the gate must be in the same arm, not the same block -
+#
+# A multi-line `if: |` puts the trigger comparison and the gate on different
+# lines. Reading only the matching line reported a correctly gated job at
+# critical severity. But consulting the whole block is equally wrong: a
+# dispatcher's `||` arms each carry their own condition, and the
+# `author_association` check in the issue_comment arm does not gate the issues
+# arm. The gate has to be in the same *arm* as the comparison.
+
+_AUTHOR_GATED_MULTILINE = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'issues' &&
+      github.event.issue.author_association == 'OWNER'
+    steps:
+      - uses: anthropics/claude-code-action@v1
+'''
+
+_AUTHOR_GATED_SAMELINE = '''\
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issues' && github.event.issue.author_association == 'OWNER'
+    steps:
+      - uses: anthropics/claude-code-action@v1
+'''
+
+_AUTHOR_GATE_IN_THE_OTHER_ARM = '''\
+on: [issues, issue_comment]
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'issues' && github.event.action == 'opened')
+    steps:
+      - uses: anthropics/claude-code-action@v1
+'''
+
+
+def test_author_gate_on_a_later_line_is_not_a_finding():
+    """The gate is present, just not on the comparison's line."""
+    for name, text in (
+        ("same line", _AUTHOR_GATED_SAMELINE),
+        ("multi-line block", _AUTHOR_GATED_MULTILINE),
+    ):
+        findings = rule_ci_agent_missing_author_association("x.yml", text)
+        assert not findings, f"{name}: gated job reported as {findings[0].severity}"
+
+
+def test_author_gate_in_another_arm_still_fires():
+    """Widening to the whole block must not clear an ungated arm.
+
+    This is the case the rule was written for: `author_association` appears in
+    the file - and even in the same `if:` block - but belongs to the other arm,
+    leaving the issues arm reachable by anyone.
+    """
+    findings = rule_ci_agent_missing_author_association(
+        "x.yml", _AUTHOR_GATE_IN_THE_OTHER_ARM
+    )
+    assert findings, "the ungated issues arm was cleared by the other arm's gate"

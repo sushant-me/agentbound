@@ -254,6 +254,87 @@ def rule_ts_builtin_tool_silent_replace(path: str, text: str) -> list[Finding]:
     return findings
 
 
+_IF_KEY_RE = re.compile(r"^[ \t]*if[ \t]*:")
+
+
+def _if_block_span(text: str, pos: int) -> tuple[int, int] | None:
+    """Absolute (start, end) of the `if:` block containing `pos`, or None.
+
+    A gate is not always on the same line as the trigger comparison it guards.
+    With a block scalar:
+
+        if: |
+          github.event_name == 'issues' &&
+          github.event.issue.author_association == 'OWNER'
+
+    the comparison and the `author_association` check sit on different lines, so
+    reading only the matching line reports a correctly gated job as ungated - at
+    critical severity.
+    """
+    lines = text.split("\n")
+    idx = text.count("\n", 0, pos)
+    match_line = lines[idx]
+    match_indent = len(match_line) - len(match_line.lstrip())
+
+    header = None
+    for i in range(idx - 1, -1, -1):
+        stripped = lines[i].strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if (len(lines[i]) - len(lines[i].lstrip())) < match_indent:
+            if _IF_KEY_RE.match(lines[i]):
+                header = i
+            break
+
+    if header is None:
+        return None
+
+    header_indent = len(lines[header]) - len(lines[header].lstrip())
+    end_line = len(lines)
+    for j in range(header + 1, len(lines)):
+        if not lines[j].strip():
+            continue
+        if (len(lines[j]) - len(lines[j].lstrip())) <= header_indent:
+            end_line = j
+            break
+
+    start_off = sum(len(l) + 1 for l in lines[:header])
+    end_off = start_off + sum(len(l) + 1 for l in lines[header:end_line])
+    return start_off, min(end_off, len(text))
+
+
+def _if_arm_at(text: str, pos: int) -> str:
+    """The `||`-separated arm of the enclosing `if:` that contains `pos`.
+
+    Same block is not the same arm. A dispatcher commonly writes:
+
+        if: |
+          (github.event_name == 'issue_comment' && ... && contains(..., github.event.comment.author_association)) ||
+          (github.event_name == 'issues' && ...)
+
+    The `author_association` check belongs to the *other* arm, so consulting the
+    whole block would clear an issues arm that has no gate at all - the exact
+    false negative this rule exists to prevent. Scoping to the arm keeps the
+    gate and the trigger comparison in the same condition, which is what
+    "gated" means. Falls back to the matching line outside an `if:` block.
+    """
+    span = _if_block_span(text, pos)
+    if span is None:
+        line_start = text.rfind("\n", 0, pos) + 1
+        line_end = text.find("\n", pos)
+        return text[line_start : len(text) if line_end == -1 else line_end]
+
+    start, end = span
+    block = text[start:end]
+    rel = pos - start
+    offset = 0
+    for segment in block.split("||"):
+        if offset <= rel <= offset + len(segment):
+            return segment
+        offset += len(segment) + 2
+    return block
+
+
 def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Finding]:
     """FILE rule — generalises GoogleCloudPlatform/vertex-ai-creative-studio.
 
@@ -301,7 +382,7 @@ def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Findi
         if line_end == -1:
             line_end = len(text)
         line_text = text[line_start:line_end]
-        if "author_association" in line_text:
+        if "author_association" in _if_arm_at(text, m.start()):
             continue
         line = text.count("\n", 0, m.start()) + 1
         findings.append(
