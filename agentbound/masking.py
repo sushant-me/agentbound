@@ -28,8 +28,10 @@ false positive being fixed.
 
 So Python is parsed with `tokenize` and only two things are blanked:
 
-* every `COMMENT` token, and
-* a `STRING` token that is a statement by itself - a docstring.
+* every `COMMENT` token,
+* a `STRING` token that is a statement by itself - a docstring, and
+* a `STRING` token that is the entire right-hand side of an assignment - a constant
+  holding documentation or an example.
 
 A string that is an *argument* is data and is left alone. Anything unparseable
 is returned raw rather than skipped.
@@ -72,31 +74,52 @@ def _line_offsets(text: str) -> list[int]:
     return offsets
 
 
-def _docstring_indexes(tokens: list[tokenize.TokenInfo]) -> set[int]:
-    """Indexes of STRING tokens that are a statement by themselves.
+def _prose_string_indexes(tokens: list[tokenize.TokenInfo]) -> set[int]:
+    """Indexes of STRING tokens that are prose rather than a value passed to code.
 
-    A docstring is a string expression nothing else is done with: the token
-    before it ends a statement, and the token after it ends one. A string passed
-    to a call has a bracket or a comma on one side and is not one.
+    Two shapes count as prose:
+
+    * a string expression nothing is done with - a docstring; and
+    * a string that is the **entire right-hand side of an assignment** - a module or
+      class constant holding documentation, an example, or a message template.
+
+    The second case is here because of a real false positive. `tool-dict-last-wins`
+    fired on
+
+        DOCSTRING = \"\"\"
+            if tool.name in self.tools_dict:
+                logger.warning("duplicate")
+            self.tools_dict[tool.name] = tool
+        \"\"\"
+
+    at the line inside the string. That file is documentation - untaken string content
+    is no more executable than a comment - and the previous rule only recognised a
+    *bare* string statement, not one bound to a name.
+
+    A string that is an argument is still left alone, because that is where the
+    logging message a rule reads as evidence lives. Only a direct assignment value is
+    masked; a string inside `frozenset({...})` or `{"a", "b"}` has a bracket or a comma
+    before it and is untouched, which is what keeps the reserved-set rules working.
     """
     significant = [
         (index, token) for index, token in enumerate(tokens)
         if token.type not in _TRIVIA
     ]
+    ends_statement = (None, tokenize.NEWLINE, tokenize.ENDMARKER)
+    starts_statement = (None, tokenize.NEWLINE, tokenize.INDENT)
+
     found: set[int] = set()
     for position, (index, token) in enumerate(significant):
         if token.type != tokenize.STRING:
             continue
-        before = significant[position - 1][1].type if position else None
-        after = (
-            significant[position + 1][1].type
-            if position + 1 < len(significant)
-            else None
-        )
-        if before in (None, tokenize.NEWLINE, tokenize.INDENT) and after in (
-            None, tokenize.NEWLINE, tokenize.ENDMARKER
-        ):
-            found.add(index)
+        before = significant[position - 1][1] if position else None
+        after = significant[position + 1][1] if position + 1 < len(significant) else None
+        if after is not None and after.type not in ends_statement:
+            continue  # a value in a larger expression, not a whole one
+        if before is None or before.type in starts_statement:
+            found.add(index)  # a docstring
+        elif before.type == tokenize.OP and before.string == "=":
+            found.add(index)  # a module / class constant, e.g. a documentation block
     return found
 
 
@@ -116,12 +139,12 @@ def _mask_python(text: str) -> str:
             return len(text)
         return min(offsets[row - 1] + column, len(text))
 
-    docstrings = _docstring_indexes(tokens)
+    prose = _prose_string_indexes(tokens)
 
     masked = list(text)
     for index, token in enumerate(tokens):
         if token.type == tokenize.COMMENT or (
-            token.type == tokenize.STRING and index in docstrings
+            token.type == tokenize.STRING and index in prose
         ):
             for position in range(absolute(*token.start), absolute(*token.end)):
                 if masked[position] != "\n":

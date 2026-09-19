@@ -165,3 +165,60 @@ def test_masking_does_not_blind_a_rule_to_code_after_a_comment(tmp_path):
     findings = _scan_one(tmp_path, "mixed.py", body)
     assert [f.rule for f in findings] == ["confirmation-gate-fails-open"]
     assert findings[0].line == 7
+
+
+# A documentation block held in a module constant: prose bound to a name rather than a
+# bare string statement. Reported by `tool-boundary-corpus` case
+# `code-pattern-only-in-comments`, which is a corpus of labelled tool-boundary cases that
+# measures this detector's precision.
+_PATTERN_IN_AN_ASSIGNED_STRING = '''\
+DOCSTRING = """
+    if tool.name in self.tools_dict:
+        logger.warning("duplicate")
+    self.tools_dict[tool.name] = tool
+"""
+
+
+def explain() -> str:
+    """Describe the anti-pattern without performing it."""
+    return DOCSTRING
+'''
+
+
+def test_the_pattern_in_an_assigned_string_is_not_a_finding(tmp_path):
+    """A string bound to a name is documentation too.
+
+    The rule previously recognised a *bare* string statement (a docstring) as prose but
+    not one assigned to a variable, so a module constant holding an example was scanned
+    as if it were code. Untaken string content is no more executable than a comment.
+    """
+    assert _scan_one(tmp_path, "assigned.py", _PATTERN_IN_AN_ASSIGNED_STRING) == []
+
+
+def test_an_assigned_string_does_not_hide_the_pattern_in_real_code(tmp_path):
+    """The control: masking prose must not blind the rule to code in the same file."""
+    body = _PATTERN_IN_AN_ASSIGNED_STRING + (
+        "\n\ndef register(tools_dict, tool):\n"
+        '    logger.warning("duplicate tool name")\n'
+        "    tools_dict[tool.name] = tool\n"
+    )
+    findings = _scan_one(tmp_path, "both.py", body)
+    assert [f.rule for f in findings] == ["tool-dict-last-wins"]
+    assert findings[0].line > 10, "the finding must be the code, not the constant"
+
+
+def test_a_set_literal_is_still_visible_to_the_reserved_set_rule(tmp_path):
+    """Only a direct assignment value is prose. Strings inside a literal are data the
+    reserved-set rules read, and masking them would be a false negative."""
+    body = (
+        "_RESERVED_TOOL_NAMES = {\n"
+        '    "finish",\n'
+        '    "transfer_to_agent",\n'
+        "}\n"
+        "\n"
+        "\n"
+        "def set_model_response(response: str) -> dict:\n"
+        "    return {'response': response}\n"
+    )
+    findings = _scan_one(tmp_path, "reserved.py", body)
+    assert "tool-reserved-name-shadowing" in [f.rule for f in findings]
