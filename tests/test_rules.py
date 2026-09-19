@@ -732,6 +732,26 @@ def test_the_same_labeler_fires_once_an_agent_is_reachable():
 
 # --- recall: every rule must declare where it came from ---------------------
 
+def _load_recall_audit():
+    """Load `scripts/recall_audit.py` by path rather than by module name.
+
+    `importlib.import_module("scripts.recall_audit")` only works when the
+    repository root is on `sys.path`. `python -m pytest` puts the working
+    directory there and a bare `pytest` does not, so these two tests passed in CI
+    and failed for anyone who ran the suite the other way - the difference had
+    nothing to do with the rules being tested. Loading by path depends on neither.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "recall_audit.py"
+    spec = importlib.util.spec_from_file_location("recall_audit_under_test", path)
+    assert spec is not None and spec.loader is not None, f"cannot load {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_every_rule_has_a_declared_origin():
     """A rule with no origin cannot be recall-audited.
 
@@ -740,9 +760,7 @@ def test_every_rule_has_a_declared_origin():
     origin table is what `scripts/recall_audit.py` checks against, so a rule
     added without an entry is a rule nobody will ever test for silence.
     """
-    import importlib
-
-    recall = importlib.import_module("scripts.recall_audit")
+    recall = _load_recall_audit()
     from agentbound.rules import FILE_RULES, PROJECT_RULES
 
     declared = {fn for _, fn, _, _ in recall.ORIGINS}
@@ -754,11 +772,26 @@ def test_every_rule_has_a_declared_origin():
 def test_origin_entries_are_not_duplicated():
     """Regression: the table was a dict keyed on the repo, which silently
     dropped the second of adk-python's two rules."""
-    import importlib
-
-    recall = importlib.import_module("scripts.recall_audit")
+    recall = _load_recall_audit()
     pairs = [(repo, fn) for repo, fn, _, _ in recall.ORIGINS]
     assert len(pairs) == len(set(pairs)), "duplicate (repo, rule) entries"
+
+
+def test_the_recall_audit_loads_without_the_repo_root_on_sys_path():
+    """The guard for the fix above, from the other direction.
+
+    Both tests in this section used `import_module("scripts.recall_audit")`,
+    which resolves only when the working directory is on `sys.path`. That is
+    exactly what `python -m pytest` arranges and exactly what `pytest` does not,
+    so the suite was green in CI and red on a clean checkout.
+    """
+    import sys
+
+    loaded = _load_recall_audit()
+    assert loaded.ORIGINS, "the origin table came back empty"
+    # Not registered under the package name the fragile import used, which is
+    # what makes this independent of sys.path in either direction.
+    assert "scripts.recall_audit" not in sys.modules
 
 
 # --- job scoping: the CVE-2026-44246 fix, nnU-Net `issue-agent.yml` ----------

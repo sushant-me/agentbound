@@ -176,3 +176,35 @@ def test_a_single_clean_file_exits_zero(tmp_path):
 def test_fail_on_none_still_rejects_a_missing_path(tmp_path):
     """`none` silences findings, not errors."""
     assert main(["scan", str(tmp_path / "nope"), "--fail-on", "none"]) == 2
+
+
+# --- the version the CLI reports is the version the package declares --------
+
+def test_the_cli_reports_the_version_the_package_declares():
+    """Regression: v0.1.10 shipped with `__version__ = "0.1.9"`.
+
+    `--version` prints `agentbound.__version__`; the release, the tag and the
+    installed distribution metadata all come from `pyproject.toml`. Nothing
+    compared the two, so for one release `agentbound --version` and
+    `pip show agentbound` disagreed, and a user had no way to tell which build
+    they were running - including the consumer this was released for, a benchmark
+    that pins this project by release and asserts its measured scores.
+
+    The fix is this assertion, not the bump: a second version string that no test
+    reads is a second version string that drifts again.
+    """
+    import re
+    from pathlib import Path
+
+    from agentbound import __version__
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    match = re.search(
+        r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    assert match is not None, "pyproject.toml has no version field to compare against"
+    declared = match.group(1)
+    assert __version__ == declared, (
+        f"agentbound.__version__ is {__version__!r} but pyproject.toml declares "
+        f"{declared!r}; `agentbound --version` would report a build that does not exist"
+    )
