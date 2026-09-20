@@ -1,0 +1,62 @@
+name: Publish
+
+# `pip install <name>` is how most people first meet a tool, and three of these packages were
+# not installable from PyPI at all - they existed only as a git URL, which is a discovery
+# channel that requires the reader to already know the project exists.
+#
+# This uses PyPI Trusted Publishing (OIDC), so there is no API token in this repository and
+# none to leak. It needs ONE piece of setup that only the account owner can do:
+#
+#   pypi.org -> Your account -> Publishing -> "Add a new pending publisher"
+#     PyPI project name : <the name below>
+#     Owner             : sushant-me
+#     Repository name   : <this repository>
+#     Workflow name     : publish.yml
+#     Environment name  : pypi
+#
+# After that, publishing a GitHub release publishes the package. Until then this job fails
+# on the upload step and nothing else is affected.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Check the metadata before it is published
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # the OIDC token the trusted publisher exchanges
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
