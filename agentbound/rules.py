@@ -236,6 +236,12 @@ _WARN_CALL_RE = re.compile(
 )
 _LOGGER_BINDING_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*)\s*=\s*logging\.getLogger\(")
 
+# A warning whose message was extracted into a constant is the same warning. Requiring the
+# literal to sit inside the call meant `logging.warning(MSG)` reported nothing, so a duplicate
+# registration went unflagged after an ordinary refactor.
+_STRING_CONST_RE = re.compile(r"^[ \t]*(?P<name>[A-Za-z_]\w*)[ \t]*=[ \t]*[\"\'](?P<val>[^\"\']*)[\"\']", re.MULTILINE)
+_WARN_IDENT_RE = re.compile(r"(?:self\.)?(?P<recv>[A-Za-z_]\w*)\.warning\(\s*(?P<name>[A-Za-z_]\w*)\s*\)")
+
 
 def _warns_about_duplicates(text: str) -> bool:
     """Whether the file reports a duplicate through a logger.
@@ -245,11 +251,21 @@ def _warns_about_duplicates(text: str) -> bool:
     """
     bound = {"logging"}
     bound.update(m.group("name") for m in _LOGGER_BINDING_RE.finditer(text))
+
+    def is_logger(recv: str) -> bool:
+        return recv in bound or recv.lower().endswith("logger")
+
     for m in _WARN_CALL_RE.finditer(text):
         if "duplicate" not in m.group("msg").lower():
             continue
-        recv = m.group("recv")
-        if recv in bound or recv.lower().endswith("logger"):
+        if is_logger(m.group("recv")):
+            return True
+    # The message may have been extracted into a constant: `logging.warning(MSG)`.
+    consts = {m.group("name"): m.group("val") for m in _STRING_CONST_RE.finditer(text)}
+    for m in _WARN_IDENT_RE.finditer(text):
+        if "duplicate" not in consts.get(m.group("name"), "").lower():
+            continue
+        if is_logger(m.group("recv")):
             return True
     return False
 

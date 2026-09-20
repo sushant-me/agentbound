@@ -30,8 +30,11 @@ So Python is parsed with `tokenize` and only two things are blanked:
 
 * every `COMMENT` token,
 * a `STRING` token that is a statement by itself - a docstring, and
-* a `STRING` token that is the entire right-hand side of an assignment - a constant
-  holding documentation or an example.
+* a **multi-line** `STRING` token that is the entire right-hand side of an assignment -
+  a documentation block or a worked example, which always spans lines. A one-line
+  assigned string is not blanked: masking those erased executable evidence, because a
+  one-line constant is how real code carries a message, and blanking it deleted the very
+  word a rule matches on.
 
 A string that is an *argument* is data and is left alone. Anything unparseable
 is returned raw rather than skipped.
@@ -119,7 +122,19 @@ def _prose_string_indexes(tokens: list[tokenize.TokenInfo]) -> set[int]:
         if before is None or before.type in starts_statement:
             found.add(index)  # a docstring
         elif before.type == tokenize.OP and before.string == "=":
-            found.add(index)  # a module / class constant, e.g. a documentation block
+            # Only a MULTI-LINE value is documentation. Masking every assignment value erased
+            # executable evidence: a single-line constant is how real code carries a message,
+            # and blanking it deleted the very word a rule matches on.
+            #
+            #     MSG = "duplicate tool name, overwriting"
+            #     logging.warning(MSG)
+            #
+            # became `MSG =` plus a warning call with nothing left to find, so the finding
+            # disappeared. That is a false NEGATIVE, which this module's own docstring calls
+            # worse than the false positive it was written to remove. A multi-line block, which
+            # is what a documentation constant actually looks like, is still blanked.
+            if "\n" in token.string:
+                found.add(index)
     return found
 
 

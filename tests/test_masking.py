@@ -222,3 +222,44 @@ def test_a_set_literal_is_still_visible_to_the_reserved_set_rule(tmp_path):
     )
     findings = _scan_one(tmp_path, "reserved.py", body)
     assert "tool-reserved-name-shadowing" in [f.rule for f in findings]
+
+
+def test_a_message_extracted_into_a_constant_is_still_a_finding(tmp_path):
+    """Masking every assignment value erased executable evidence.
+
+    A one-line constant is how real code carries a message, and blanking it deleted the very
+    word the rule matches on:
+
+        MSG = "duplicate tool name, overwriting"
+        logging.warning(MSG)
+
+    became an assignment with a blank value and a warning call with nothing left to find, so
+    the finding disappeared. That is a false NEGATIVE, which this module's own docstring calls
+    worse than the false positive the masking exists to remove. Only a multi-line block - what
+    a documentation constant actually looks like - is prose.
+    """
+    body = (
+        "import logging\n"
+        "\n"
+        'MSG = "duplicate tool name, overwriting"\n'
+        "\n"
+        "\n"
+        "def register(tools_dict, tool):\n"
+        "    if tool.name in tools_dict:\n"
+        "        logging.warning(MSG)\n"
+        "    tools_dict[tool.name] = tool\n"
+    )
+    findings = _scan_one(tmp_path, "refactored.py", body)
+    assert [f.rule for f in findings] == ["tool-dict-last-wins"]
+
+
+def test_a_multi_line_assigned_block_is_still_masked(tmp_path):
+    """The control: the false positive the masking was written to remove stays removed."""
+    body = (
+        'DOCSTRING = """\n'
+        "    if tool.name in self.tools_dict:\n"
+        '        logger.warning("duplicate")\n'
+        "    self.tools_dict[tool.name] = tool\n"
+        '"""\n'
+    )
+    assert _scan_one(tmp_path, "docs.py", body) == []
