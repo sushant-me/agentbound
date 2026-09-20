@@ -34,7 +34,11 @@ So Python is parsed with `tokenize` and only two things are blanked:
   a documentation block or a worked example, which always spans lines. A one-line
   assigned string is not blanked: masking those erased executable evidence, because a
   one-line constant is how real code carries a message, and blanking it deleted the very
-  word a rule matches on.
+  word a rule matches on. The trade is deliberate and goes the stated way: a one-line
+  string that quotes an anti-pattern is now reported where it previously was not, which is
+  a false positive, against a rule that had gone silent on real evidence, which is a false
+  negative. The corpus of 23 labelled cases still measures the same precision, so the
+  trade is not currently costing accuracy.
 
 A string that is an *argument* is data and is left alone. Anything unparseable
 is returned raw rather than skipped.
