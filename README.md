@@ -392,3 +392,12 @@ reserved-name watchlist is framework-specific and currently covers the ADK
 family; contributions to widen coverage are welcome.
 
 Authored by Sushant Poudel ([@sushant-me](https://github.com/sushant-me)).
+
+## Security
+
+This project has a published security advisory:
+**[GHSA-mffv-hhg5-mm33](https://github.com/sushant-me/agentbound/security/advisories/GHSA-mffv-hhg5-mm33)**
+(medium) — The masker blanked one-line assigned strings, deleting the word a rule matches on, so a real finding was reported as nothing.
+
+Fixed in v0.1.12. The advisory carries the reproduction and the regression test; the fix
+is checked by the test suite on every push.
