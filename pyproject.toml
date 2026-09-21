@@ -9,6 +9,30 @@ description = "Static detector for AI-agent tool-boundary bugs (tool shadowing, 
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
+authors = [{ name = "Sushant Poudel", email = "sushant.poudel2028@gmail.com" }]
+keywords = [
+  "ai-agents",
+  "llm-agents",
+  "mcp",
+  "security",
+  "static-analysis",
+  "tool-poisoning",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Topic :: Security",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/sushant-me/agentbound"
+Repository = "https://github.com/sushant-me/agentbound"
+Issues = "https://github.com/sushant-me/agentbound/issues"
+"Security advisories" = "https://github.com/sushant-me/agentbound/security/advisories"
+"Advisory GHSA-mffv-hhg5-mm33" = "https://github.com/sushant-me/agentbound/security/advisories/GHSA-mffv-hhg5-mm33"
 
 [project.scripts]
 agentbound = "agentbound.cli:main"
