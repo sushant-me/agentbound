@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software in work you publish, please cite it as below."
+title: "agentbound"
+type: software
+authors:
+  - family-names: Poudel
+    given-names: Sushant
+    email: sushant.poudel2028@gmail.com
+    affiliation: "Nepal Engineering College, Bhaktapur, Nepal"
+    # Register an ORCID iD and add it here — it is the identifier that
+    # disambiguates this author from other researchers of the same name:
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+abstract: >-
+  Static detector for AI-agent tool-boundary bugs: tool shadowing, reserved-name collisions, fail-open confirmation gates, and unauthenticated agent CI dispatch.
+keywords:
+  - ai-agents
+  - llm-agents
+  - mcp
+  - security
+  - static-analysis
+  - tool-poisoning
+license: MIT
+repository-code: "https://github.com/sushant-me/agentbound"
