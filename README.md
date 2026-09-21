@@ -106,7 +106,7 @@ message in a collapsible block, and exposes `findings` (count at any severity)
 and `exit-code` as step outputs, so a later step can act on the result without
 parsing the log.
 
-The `action` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) tests
+The `action` job in [`.github/workflows/ci.yml`](https://github.com/sushant-me/agentbound/blob/master/.github/workflows/ci.yml) tests
 it through that same interface — a vulnerable fixture that must fail the run and
 a clean one that must pass at the lowest threshold. Unit tests never execute
 `action.yml`, so a broken install step would otherwise be invisible until a user
