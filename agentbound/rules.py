@@ -270,6 +270,106 @@ def _warns_about_duplicates(text: str) -> bool:
     return False
 
 
+# A normalization applied to an element while building a name collection.
+_NORM_CALL_RE = re.compile(r"\.\s*(?:strip|lower|casefold)\s*\(\s*\)")
+
+
+def _guarded_names(text: str) -> set[str]:
+    """Names bound to a collection of *normalized* names.
+
+    Two shapes are both real, and the first draft only handled the first - which
+    is why it missed the code it was written for:
+
+      * ``names = frozenset(x.strip() for x in config)``  (assignment), and
+      * a property/method that *returns* the collection
+        (``def _tool_names(self): return frozenset(... .strip() ...)``).
+
+    The collection is looked up by scanning back a bounded window from each
+    normalization call, so nesting and line breaks do not matter.
+    """
+    names: set[str] = set()
+    for norm in _NORM_CALL_RE.finditer(text):
+        window = text[max(0, norm.start() - 600): norm.start()]
+        ctors = list(re.finditer(r"\b(?:frozenset|set|tuple|list)\s*[\(\[]", window))
+        if not ctors:
+            continue
+        before = window[:ctors[-1].start()]
+
+        assign = re.search(r"([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*$", before)
+        if assign:
+            names.add(assign.group(1))
+            continue
+        defs = list(re.finditer(r"def\s+([A-Za-z_]\w*)\s*\(\s*self\b", before))
+        if defs:
+            names.add(defs[-1].group(1))
+    return names
+
+
+# A membership test that pulls a name out of a request or record.
+_NAME_IN_SET_RE = re.compile(
+    r"(?P<expr>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+    r"(?:\[\s*[\"'](?:name|tool_name)[\"']\s*\]|\.name))"
+    r"(?P<trail>\s*\.\s*(?:strip|lower|casefold)\s*\(\s*\))?"
+    r"\s*(?:not\s+)?in\s+(?:self\.)?(?P<container>[A-Za-z_]\w*)"
+)
+
+
+def rule_guard_name_normalization_asymmetry(path: str, text: str) -> list[Finding]:
+    """FILE rule — generalises `langchain-typesafe` AutoModeMiddleware's tool gate.
+
+    The guard builds its set of protected names by normalizing each element::
+
+        return frozenset(
+            (tool if isinstance(tool, str) else tool.name).strip()
+            for tool in self.config.tools
+        )
+
+    but tests the incoming name without normalizing it::
+
+        if request.tool_call["name"] not in self._tool_names:
+            return handler(request)      # skips classification entirely
+
+    A name carrying surrounding whitespace fails the membership test and the call
+    is handed straight to the handler with the classifier never consulted.
+    Normalization applied on one side only means the guard can be stepped around
+    by formatting, and it does so silently: nothing errors, nothing is logged.
+
+    Severity is medium rather than high on purpose. Whether the call then
+    *executes* depends on the surrounding framework's own lookup - langgraph's
+    ToolNode resolves tool names by exact match and would not find ``" bash"`` -
+    so what is demonstrated is a guard that does not apply, not an executed tool.
+    """
+    findings: list[Finding] = []
+    if not path.endswith((".py", ".pyi")):
+        return findings
+
+    guarded = _guarded_names(text)
+    if not guarded:
+        return findings
+
+    for m in _NAME_IN_SET_RE.finditer(text):
+        if m.group("container") not in guarded:
+            continue
+        if m.group("trail"):          # normalized on both sides: correct
+            continue
+        line = text.count("\n", 0, m.start()) + 1
+        findings.append(
+            Finding(
+                rule="guard-name-normalization-asymmetry",
+                severity="medium",
+                path=path,
+                line=line,
+                message=(
+                    f"{m.group('container')} is built from normalized names, but "
+                    f"{m.group('expr')} is tested without normalizing it; a name "
+                    "with surrounding whitespace fails the test and the guard is "
+                    "skipped (fails open by formatting)"
+                ),
+            )
+        )
+    return findings
+
+
 def rule_tool_dict_last_wins(path: str, text: str) -> list[Finding]:
     """FILE rule — generalises the last-wins overwrite in adk-python llm_request.py.
 
@@ -1333,6 +1433,7 @@ def rule_ci_agent_untrusted_issue_content(path: str, text: str) -> list[Finding]
 
 FILE_RULES = [
     rule_confirmation_gate_fails_open,
+    rule_guard_name_normalization_asymmetry,
     rule_ci_agent_missing_author_association,
     rule_ci_agent_untrusted_issue_content,
     rule_ci_agent_write_scope_on_untrusted_trigger,

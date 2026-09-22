@@ -36,6 +36,7 @@ side. `agentbound` scans the *framework* side, which no general tool does today.
 |---|---|---|
 | `tool-reserved-name-shadowing` | high | a reserved-name set omits a framework-owned tool the framework registers (`def <name>(`) |
 | `confirmation-gate-fails-open` | high | `inspect.signature(predicate)` filters tool args, so a generic predicate returns `False` and the gate opens |
+| `guard-name-normalization-asymmetry` | medium | a guard builds its protected-name set from **normalized** names (`… .strip()`) but tests the incoming name **raw**, so a name with surrounding whitespace fails the membership test and the guard is skipped — silently. Medium rather than high because whether the call then executes depends on the surrounding framework's own lookup: langgraph's `ToolNode` resolves by exact name and would not find `" bash"` |
 | `ci-agent-untrusted-issue-content` | high | a workflow runs an AI agent action **and** consumes issue or comment text — from the event payload, or fetched with `gh issue list --json ...body`. Both CI-agent rules also require that an author *without* write access can actually reach the agent: `claude-code-action` and `codex-action` refuse such an actor unless an input opts them in, while `run-gemini-cli` and `gemini-cli-action` perform no actor check at all. The precondition is per action and read from each action's source, and is evaluated per **job**, so a job gated on `author_association` does not inherit it from a public job in the same file (see *Precision* below). The opt-out must also **opt in more than a named account**: both actions bypass their check only for the accounts listed, so `allow-users: "MathiasGruber"` leaves an arbitrary GitHub user unable to reach the agent. What reaches anyone is a `*` or a value the *event* computes — `${{ github.event.issue.user.login }}` is the author of the issue the attacker just opened, which is the CVE's vector. An empty value is likewise no opt-out: `allowed_non_write_users: ""` leaves the write-permission check in place |
 | `ci-agent-write-scope-on-untrusted-trigger` | high | an AI agent action runs in a job triggered by issue/comment/review events, the job grants a `write` scope, **and** an untrusted author can reach the agent. The complement of the rule above: here the untrusted text never appears in the YAML, because the agent fetches the issue itself at runtime with the token the job hands it, so no scan of the file can see it. `id-token: write` is not counted — it mints the OIDC token and is what a hardened setup uses. Evaluated per job, as above. Severity scales with how far the agent's **mutating tools** reach, which is a property of the `--allowedTools` patterns and not of the permissions block:
 
@@ -150,7 +151,7 @@ copy may be sitting on the branch that *fixes* the thing a rule detects — whic
 is exactly what happened the first time this audit was run by hand, and made a
 working rule look broken.
 
-All eight rules fire on at least one origin:
+All nine rules fire on at least one origin:
 
 | origin | rule that fires |
 |---|---|
@@ -161,6 +162,7 @@ All eight rules fire on at least one origin:
 | `google-gemini/gemini-cli` | `ci-agent-untrusted-issue-content`, `ci-agent-missing-author-association` |
 | `GoogleCloudPlatform/vertex-ai-creative-studio` | `ci-agent-missing-author-association` |
 | `anthropics/claude-code` | `ci-agent-write-scope-on-untrusted-trigger` |
+| `langchain-ai/langchain` (`libs/partners/typesafe`) | `guard-name-normalization-asymmetry` |
 
 A test asserts every rule has a declared origin, so a new rule cannot be added
 without saying what it is supposed to find.

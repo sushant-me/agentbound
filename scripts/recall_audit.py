@@ -21,6 +21,14 @@ Usage:
     git clone --filter=blob:none https://github.com/google/adk-python /tmp/adk-python
     python scripts/recall_audit.py /tmp/adk-python origin/main
 
+`langchain-typesafe` is a package inside a monorepo. The clone is sparse to keep
+it small, but the audit still walks the committed tree, so expect this origin to
+be slow:
+
+    git clone --filter=blob:none --sparse https://github.com/langchain-ai/langchain /tmp/langchain-typesafe
+    (cd /tmp/langchain-typesafe && git sparse-checkout set libs/partners/typesafe)
+    python scripts/recall_audit.py /tmp/langchain-typesafe origin/master
+
 Prints one line per repository naming the rules that fired. Every rule in the
 table is expected to fire on at least one origin, so an empty result or a
 missing rule name is the signal to investigate.
@@ -58,6 +66,9 @@ ORIGINS: list[tuple[str, str, str, str]] = [
      "tools_dict assigned under a logged duplicate"),
     ("adk-python", "rule_confirmation_gate_fails_open", "confirmation-gate-fails-open",
      "an inspect.signature filter that opens the gate for an unrecognised predicate"),
+    ("langchain-typesafe", "rule_guard_name_normalization_asymmetry",
+     "guard-name-normalization-asymmetry",
+     "a tool-name guard that strips the configured names but tests the incoming name raw"),
     ("adk-go", "rule_go_inmodel_tool_unoccupied", "tool-inmodel-name-unoccupied",
      "setTool() without registering the name"),
     ("adk-java", "rule_java_inmodel_tool_unoccupied", "tool-inmodel-name-unoccupied",

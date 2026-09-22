@@ -3,6 +3,7 @@
 from agentbound.rules import (
     rule_tool_reserved_name_shadowing,
     rule_confirmation_gate_fails_open,
+    rule_guard_name_normalization_asymmetry,
     rule_ci_agent_missing_author_association,
     rule_ci_agent_untrusted_issue_content,
     rule_ci_agent_write_scope_on_untrusted_trigger,
@@ -1876,3 +1877,74 @@ def test_ts_builtin_tool_silent_replace_requires_the_whole_shape():
     for name, source in cases.items():
         findings = rule_ts_builtin_tool_silent_replace("base_tool.ts", source)
         assert findings == [], f"{name} was reported: {findings[0].message}"
+
+
+# --- rule 10: guard name-normalization asymmetry ---------------------------
+
+# Trimmed to the shape that matters, from langchain-typesafe 0.0.1a3
+# auto_mode.py. The set is built by normalizing each name; the gate tests the
+# incoming name raw. Both the sync and async paths carry the same defect.
+AUTOMODE_ASYMMETRIC = '''\
+class AutoModeMiddleware:
+    @property
+    def _tool_names(self):
+        return frozenset(
+            (tool if isinstance(tool, str) else tool.name).strip()
+            for tool in self.config.tools
+        )
+
+    def wrap_tool_call(self, request, handler):
+        if request.tool_call["name"] not in self._tool_names:
+            return handler(request)
+        return handler(request)
+
+    async def awrap_tool_call(self, request, handler):
+        if request.tool_call["name"] not in self._tool_names:
+            return await handler(request)
+        return await handler(request)
+'''
+
+# The upstream fix: normalize the incoming name too.
+AUTOMODE_SYMMETRIC = AUTOMODE_ASYMMETRIC.replace(
+    'request.tool_call["name"] not in', 'request.tool_call["name"].strip() not in')
+
+# No normalization anywhere, so there is no asymmetry to report.
+GUARD_WITHOUT_NORMALIZATION = '''\
+GUARDED = frozenset(configured_names)
+
+def check(request):
+    if request.tool_call["name"] not in GUARDED:
+        return run(request)
+'''
+
+
+def test_guard_name_normalization_asymmetry_detected():
+    findings = rule_guard_name_normalization_asymmetry("auto_mode.py", AUTOMODE_ASYMMETRIC)
+    hits = [f for f in findings if f.rule == "guard-name-normalization-asymmetry"]
+    # Both paths: the sync gate and the async gate.
+    assert len(hits) == 2, [f.line for f in hits]
+    assert all(f.severity == "medium" for f in hits)
+    assert all("_tool_names" in f.message for f in hits)
+
+
+def test_guard_normalized_on_both_sides_is_clean():
+    assert rule_guard_name_normalization_asymmetry("auto_mode.py", AUTOMODE_SYMMETRIC) == []
+
+
+def test_guard_without_normalization_is_clean():
+    assert rule_guard_name_normalization_asymmetry(
+        "guard.py", GUARD_WITHOUT_NORMALIZATION) == []
+
+
+def test_guard_asymmetry_ignores_non_python():
+    assert rule_guard_name_normalization_asymmetry(
+        "notes.md", AUTOMODE_ASYMMETRIC) == []
+
+
+def test_guard_asymmetry_handles_the_assignment_form():
+    src = ('GUARDED = frozenset(n.strip() for n in configured)\n'
+           'def check(req):\n'
+           '    if req["name"] not in GUARDED:\n'
+           '        return run(req)\n')
+    hits = rule_guard_name_normalization_asymmetry("g.py", src)
+    assert len(hits) == 1 and hits[0].rule == "guard-name-normalization-asymmetry"
