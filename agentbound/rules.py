@@ -273,6 +273,27 @@ def _warns_about_duplicates(text: str) -> bool:
 # A normalization applied to an element while building a name collection.
 _NORM_CALL_RE = re.compile(r"\.\s*(?:strip|lower|casefold)\s*\(\s*\)")
 
+# Docstrings and comments. A guard pattern quoted in prose is not a guard.
+_TRIPLE_QUOTED_RE = re.compile(r"(\"\"\"|''')[\s\S]*?\1")
+_LINE_COMMENT_RE = re.compile(r"#[^\n]*")
+
+
+def _mask_prose(text: str) -> str:
+    """Blank out docstrings and comments, keeping offsets and line numbers.
+
+    The rule's own docstring quotes the vulnerable shape, so without this it
+    matches its own documentation - the same false positive the corpus pins as
+    `code-pattern-only-in-comments`, and the one this repository already fixed
+    once ("a string bound to a name is prose, not code"). Every non-newline
+    character is replaced by a space rather than deleted, so a line number
+    computed against the masked text still points at the right line of the
+    original.
+    """
+    def blank(match: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", " ", match.group(0))
+
+    return _LINE_COMMENT_RE.sub(blank, _TRIPLE_QUOTED_RE.sub(blank, text))
+
 
 def _guarded_names(text: str) -> set[str]:
     """Names bound to a collection of *normalized* names.
@@ -343,11 +364,14 @@ def rule_guard_name_normalization_asymmetry(path: str, text: str) -> list[Findin
     if not path.endswith((".py", ".pyi")):
         return findings
 
-    guarded = _guarded_names(text)
+    # Match against code only: a docstring quoting the vulnerable shape is prose.
+    code = _mask_prose(text)
+
+    guarded = _guarded_names(code)
     if not guarded:
         return findings
 
-    for m in _NAME_IN_SET_RE.finditer(text):
+    for m in _NAME_IN_SET_RE.finditer(code):
         if m.group("container") not in guarded:
             continue
         if m.group("trail"):          # normalized on both sides: correct

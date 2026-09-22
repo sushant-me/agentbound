@@ -1948,3 +1948,33 @@ def test_guard_asymmetry_handles_the_assignment_form():
            '        return run(req)\n')
     hits = rule_guard_name_normalization_asymmetry("g.py", src)
     assert len(hits) == 1 and hits[0].rule == "guard-name-normalization-asymmetry"
+
+
+def test_guard_asymmetry_ignores_a_pattern_quoted_in_a_docstring():
+    """A guard shape quoted in a docstring is prose, not a guard.
+
+    The normalized set is real here, so the guard is genuinely configured; only
+    the membership test is quoted. Without masking this reports a finding inside
+    documentation - the false positive the corpus pins as
+    `code-pattern-only-in-comments`.
+    """
+    src = ('class M:\n'
+           '    @property\n'
+           '    def _tool_names(self):\n'
+           '        return frozenset(t.strip() for t in self.config.tools)\n'
+           '\n'
+           '    def wrap(self, request, handler):\n'
+           '        """Historically this read:\n'
+           '        if request.tool_call["name"] not in self._tool_names:\n'
+           '            return handler(request)\n'
+           '        """\n'
+           '        return handler(request)\n')
+    assert rule_guard_name_normalization_asymmetry("m.py", src) == []
+
+
+def test_guard_asymmetry_ignores_a_pattern_in_a_comment():
+    src = ('GUARDED = frozenset(n.strip() for n in configured)\n'
+           'def check(req):\n'
+           '    # if req["name"] not in GUARDED:  (the old, asymmetric form)\n'
+           '    return run(req)\n')
+    assert rule_guard_name_normalization_asymmetry("c.py", src) == []
