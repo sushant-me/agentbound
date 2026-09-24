@@ -43,9 +43,47 @@ _RESERVED_NAME_RE = re.compile(
 _STRING_LITERAL_RE = re.compile(r"[\"']([^\"']+)[\"']")
 _IDENTIFIER_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\.\s*__name__\b|\b([A-Za-z_]\w*)\b")
 
+# A framework can also reserve tool names one constant at a time instead of as a
+# set. microsoft/agent-framework does this at module level — verified on
+# origin/main, 2026-09-24:
+#
+#     _MCP_PROGRESSIVE_LIST_TOOL_NAME = "list_mcp_tools"  # core/agent_framework/_mcp.py
+#     EXECUTE_CODE_TOOL_NAME = "execute_code"             # monty/.../_execute_code_tool.py
+#
+# The set matcher above cannot see that shape: the variable contains no
+# "reserved", and the value is a single string rather than a brace literal. The
+# declaration was therefore invisible, so a name omitted from it could never be
+# reported — the shape was uncovered rather than handled.
+#
+# Only module-level (column 0) names count. Indented assignments are deliberately
+# excluded: a class attribute or a function-local `tool_name = "..."` is not
+# evidence that a project keeps a reserved list, and the same project declares
+# attributes this way (DefaultMCPToolHandler.LIST_TOOLS_TOOL_NAME), so the boundary
+# is a decision rather than an oversight. Unrelated module-level string constants
+# are excluded for the same reason — otherwise every `TOOLBOX_NAME = "..."` beside
+# an adk-style `def set_model_response(` would read as an omission.
+_PLAIN_STRING_ASSIGN_RE = re.compile(
+    r"^(?P<assign>[A-Za-z_]\w*)\s*=\s*[\"'](?P<value>[^\"']+)[\"']\s*$",
+    re.MULTILINE,
+)
+_TOOL_SHAPED_VALUE_RE = re.compile(r"^[A-Za-z_][\w./-]*$")
+
+
+def _looks_like_tool_name_constant(assign: str, value: str) -> bool:
+    """True for `*_TOOL_NAME = "..."` / `*_RESERVED* = "..."` shaped declarations."""
+    lowered = assign.lower()
+    if "tool" not in lowered:
+        return False
+    if "reserved" not in lowered and "name" not in lowered:
+        return False
+    return _TOOL_SHAPED_VALUE_RE.match(value) is not None
+
 
 def _find_reserved_sets(text: str) -> list[tuple[int, str, set[str]]]:
-    """Return (line, assign_name, member_names) for every reserved-name set.
+    """Return (line, assign_name, member_names) for every reserved-name declaration.
+
+    Two shapes are recognised: a set literal (see `_RESERVED_NAME_RE`) and a single
+    string constant (see `_PLAIN_STRING_ASSIGN_RE`).
 
     Member names are the union of string literals and bare identifiers found
     inside the literal. `foo.__name__` is normalised to `foo`.
@@ -81,6 +119,16 @@ def _find_reserved_sets(text: str) -> list[tuple[int, str, set[str]]]:
             names.add(a or b)
         line = text.count("\n", 0, m.start()) + 1
         results.append((line, m.group("assign"), names))
+
+    # Single-constant declarations, which the set matcher cannot see at all.
+    for m in _PLAIN_STRING_ASSIGN_RE.finditer(text):
+        assign = m.group("assign")
+        value = m.group("value")
+        if not _looks_like_tool_name_constant(assign, value):
+            continue
+        line = text.count("\n", 0, m.start()) + 1
+        results.append((line, assign, {value}))
+
     return results
 
 
@@ -116,23 +164,37 @@ def rule_tool_reserved_name_shadowing(files: dict[str, str]) -> list[Finding]:
         if not re.search(rf"\bdef\s+{re.escape(name)}\s*\(", all_py):
             continue
         for path, sets in reserved_by_file.items():
-            for line, assign, members in sets:
-                if name in members:
-                    continue
-                findings.append(
-                    Finding(
-                        rule="tool-reserved-name-shadowing",
-                        severity="high",
-                        path=path,
-                        line=line,
-                        message=(
-                            f"framework-owned tool '{name}' is registered "
-                            f"(def {name}) but missing from reserved set "
-                            f"'{assign}'; a third-party tool advertising "
-                            f"'{name}' can displace the framework's own tool"
-                        ),
-                    )
+            # A file's declarations are read as one reserved list, not one list per
+            # declaration. With the set shape those are the same thing, so the
+            # assumption was invisible; a framework that reserves names one constant
+            # at a time (microsoft/agent-framework) makes them differ, and scoring
+            # each constant on its own would flag `LIST_TOOLS_TOOL_NAME = "tools/list"`
+            # for omitting a name that a second constant in the same file reserves.
+            union: set[str] = set()
+            for _line, _assign, members in sets:
+                union |= members
+            if name in union:
+                continue
+            line, assign, _members = sets[0]
+            where = (
+                f"'{assign}'"
+                if len(sets) == 1
+                else f"'{assign}' (+{len(sets) - 1} more declaration(s) in this file)"
+            )
+            findings.append(
+                Finding(
+                    rule="tool-reserved-name-shadowing",
+                    severity="high",
+                    path=path,
+                    line=line,
+                    message=(
+                        f"framework-owned tool '{name}' is registered "
+                        f"(def {name}) but missing from reserved set "
+                        f"{where}; a third-party tool advertising "
+                        f"'{name}' can displace the framework's own tool"
+                    ),
                 )
+            )
     return findings
 
 

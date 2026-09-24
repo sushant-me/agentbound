@@ -61,6 +61,77 @@ def test_reserved_name_shadowing_clean_when_name_reserved():
     assert findings == []
 
 
+# A framework may also reserve a tool name one constant at a time rather than as a
+# set; microsoft/agent-framework does. That shape was invisible to the matcher, so
+# an omission from it could never be reported. These three fixtures pin both
+# directions: the shape is now seen, and unrelated string constants are still not.
+AGENT_FRAMEWORK_CONST_OMITS_NAME = '''\
+LIST_TOOLS_TOOL_NAME = "tools/list"
+
+def set_model_response() -> str:
+    return "ok"
+'''
+
+AGENT_FRAMEWORK_CONST_RESERVES_NAME = '''\
+LIST_TOOLS_TOOL_NAME = "tools/list"
+SET_MODEL_RESPONSE_TOOL_NAME = "set_model_response"
+
+def set_model_response() -> str:
+    return "ok"
+'''
+
+UNRELATED_STRING_CONSTANTS = '''\
+PATH_SEGMENT = "tools/list"
+TOOL_REGISTRY = "tools/list"
+
+def set_model_response() -> str:
+    return "ok"
+'''
+
+
+def test_reserved_name_shadowing_sees_single_constant_declarations():
+    findings = rule_tool_reserved_name_shadowing(
+        {"mcp_handler.py": AGENT_FRAMEWORK_CONST_OMITS_NAME}
+    )
+    assert any("set_model_response" in f.message for f in findings)
+
+
+def test_reserved_name_shadowing_clean_when_single_constant_reserves_it():
+    findings = rule_tool_reserved_name_shadowing(
+        {"mcp_handler.py": AGENT_FRAMEWORK_CONST_RESERVES_NAME}
+    )
+    assert findings == []
+
+
+def test_reserved_name_shadowing_ignores_unrelated_string_constants():
+    findings = rule_tool_reserved_name_shadowing(
+        {"mcp_handler.py": UNRELATED_STRING_CONSTANTS}
+    )
+    assert findings == []
+
+
+INDENTED_TOOL_NAME_CONSTANT = '''\
+class DefaultMCPToolHandler:
+    LIST_TOOLS_TOOL_NAME = "tools/list"
+
+def set_model_response() -> str:
+    return "ok"
+'''
+
+
+def test_reserved_name_shadowing_ignores_indented_assignments():
+    """An indented assignment is not a reserved-list declaration.
+
+    microsoft/agent-framework declares DefaultMCPToolHandler.LIST_TOOLS_TOOL_NAME
+    as a class attribute. Counting indented assignments would also count every
+    function-local `tool_name = "..."`, so the rule stops at column 0 on purpose.
+    """
+    findings = rule_tool_reserved_name_shadowing(
+        {"mcp_handler.py": INDENTED_TOOL_NAME_CONSTANT}
+    )
+    assert findings == []
+
+
 # --- rule 3: confirmation gate fails open -----------------------------------
 
 ADK_PY_GATE = '''\
