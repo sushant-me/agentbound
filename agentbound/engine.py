@@ -31,14 +31,17 @@ def _iter_files(root: Path):
         yield path
 
 
-def scan(root: str | Path) -> list[Finding]:
-    """Scan a directory (or a single file) and return its findings.
+def scan_with_stats(root: str | Path) -> tuple[list[Finding], int]:
+    """Scan a directory (or a single file) and return `(findings, files_read)`.
+
+    The second value is how many files were actually opened and masked, and it
+    exists because "no findings" over zero files is not a clean scan - it is a
+    scan that did not happen. `cli.main` turns a zero into exit 2, so a CI gate
+    cannot pass on a walk that read nothing.
 
     A single file is scanned as itself. `rglob` over a file path yields nothing,
     so without this branch `agentbound scan somefile.py` reported a clean result
     by inspecting nothing at all - the failure this whole project is about.
-    Callers that need to distinguish "nothing found" from "nothing read" should
-    check the path themselves; `cli.main` does, and exits 2.
     """
     root = Path(root)
     if root.is_file():
@@ -76,4 +79,9 @@ def scan(root: str | Path) -> list[Finding]:
         findings.extend(rule(files))
 
     findings.sort(key=lambda f: (f.path, f.line, f.rule))
-    return findings
+    return findings, len(files)
+
+
+def scan(root: str | Path) -> list[Finding]:
+    """Findings only, for callers that do not need the files-read count."""
+    return scan_with_stats(root)[0]

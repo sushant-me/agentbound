@@ -160,6 +160,41 @@ def test_a_missing_path_is_not_reported_as_clean(tmp_path):
     assert main(["scan", str(tmp_path / "nope")]) != 0
 
 
+def test_an_empty_directory_exits_two_not_zero(tmp_path, capsys):
+    """The missing-path fix stopped one step short.
+
+    A directory that exists but holds nothing scannable walked nothing, found
+    nothing, and exited 0 - the same clean bill of health, for the same reason,
+    one branch over. `files_read == 0` is the fact that separates "nothing
+    wrong" from "nothing looked at", and it has to reach the exit code.
+    """
+    rc = main(["scan", str(tmp_path)])
+    assert rc == 2
+    assert "nothing to scan" in capsys.readouterr().err
+
+
+def test_a_directory_with_nothing_scannable_exits_two(tmp_path):
+    """An existing tree whose files are all outside `_SCAN_EXTS` is the same
+    case, and the more likely one in practice: a checkout that landed wrong, or
+    a path pointed at the wrong level."""
+    (tmp_path / "NOTES.txt").write_text("hello\n", encoding="utf-8")
+    (tmp_path / "data.csv").write_text("a,b\n", encoding="utf-8")
+    assert main(["scan", str(tmp_path)]) == 2
+
+
+def test_a_clean_scan_reports_how_many_files_were_read(tmp_path, capsys):
+    """A zero exit is only meaningful next to the size of the scan, so the count
+    is printed and not inferred."""
+    _tree(tmp_path, "ok.py", CLEAN)
+    assert main(["scan", str(tmp_path)]) == 0
+    assert "scanned 1 file(s)" in capsys.readouterr().out
+
+
+def test_json_is_not_a_second_exit_path_for_an_empty_scan(tmp_path, capsys):
+    """`--json` must not become a way around the zero-file guard."""
+    assert main(["scan", str(tmp_path), "--json"]) == 2
+
+
 def test_a_single_file_path_is_scanned_not_ignored(tmp_path):
     """`rglob` over a file path yields nothing, so this used to report clean by
     reading nothing at all."""

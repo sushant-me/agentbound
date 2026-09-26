@@ -80,12 +80,25 @@ makes the tool unusable as a gate, which is why the threshold exists.
 | `low` *(default)* | any finding — the original contract |
 | `none` | never; still reports, so it is not a silencer |
 
-Exit code `2` is reserved for a path that does not exist, so a typo is never
-mistaken for a clean scan. It is worth stating because it was **not** implemented
-until `0.1.9`: a missing directory walked nothing, found nothing, and exited `0`,
-and so did a single-file path, because `rglob` over a file yields no files. Both
-are the same failure this tool exists to report, in the tool itself, and both now
-have tests and a CI step.
+Exit code `2` is reserved for an input that could not be scanned, so a typo or an
+empty walk is never mistaken for a clean scan. It is worth stating because it was
+**not** implemented until `0.1.9`: a missing directory walked nothing, found
+nothing, and exited `0`, and so did a single-file path, because `rglob` over a
+file yields no files. Both are the same failure this tool exists to report, in the
+tool itself, and both now have tests and a CI step.
+
+That fix stopped one step short, and this change finishes it. A directory that
+*exists* but holds nothing scannable — every file outside the extensions the
+rules run on, which is what a checkout pointed one level too high looks like —
+also walked nothing, found nothing, and exited `0`. `files_read == 0` is now its
+own exit `2`, for the same reason as the missing path, and the human output prints
+how many files were read:
+
+```
+scanned 17 file(s)
+```
+
+so a green run says how much of the tree that green covers.
 
 ## Use it as a GitHub Action
 

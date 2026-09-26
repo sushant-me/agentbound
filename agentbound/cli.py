@@ -1,4 +1,10 @@
-"""Command-line interface: `agentbound scan <path> [--json]`."""
+"""Command-line interface: `agentbound scan <path> [--json]`.
+
+Exit codes are the interface for CI: ``0`` clean, ``1`` a finding at or above
+``--fail-on``, ``2`` the input could not be scanned — either there is no such
+path, or the path exists and holds nothing the rules run on. Both halves of that
+second case mean the same thing to a pipeline: no evidence, not a clean bill.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from .engine import scan
+from .engine import _SCAN_EXTS, scan_with_stats
 from . import __version__
 
 _SEVERITY_COLOR = {
@@ -41,9 +47,13 @@ def _at_or_above(finding, threshold: str) -> bool:
         return True
 
 
-def _human(findings) -> str:
+def _human(findings, files_read: int) -> str:
+    # The count is printed for the same reason the exit code distinguishes a
+    # zero: a reader has to be able to see how much of the tree was looked at,
+    # or "No findings" reads as a clean bill of health for any size of scan.
+    header = f"scanned {files_read} file(s)\n"
     if not findings:
-        return "No findings.\n"
+        return header + "No findings.\n"
     lines = []
     for f in findings:
         color = _SEVERITY_COLOR.get(f.severity, "")
@@ -52,7 +62,7 @@ def _human(findings) -> str:
             f"{f.path}:{f.line}  {f.rule}\n"
             f"            {f.message}"
         )
-    return "\n".join(lines) + "\n"
+    return header + "\n" + "\n".join(lines) + "\n"
 
 
 def main(argv=None) -> int:
@@ -88,12 +98,24 @@ def main(argv=None) -> int:
             # exist. Exit 2 keeps it distinguishable from a real clean scan.
             sys.stderr.write(f"agentbound: no such path: {args.path}\n")
             return 2
-        findings = scan(target)
+        findings, files_read = scan_with_stats(target)
+        if files_read == 0:
+            # The same failure as the missing path above, one step over, and it
+            # survived that fix: a directory that exists but holds nothing
+            # scannable walked nothing, found nothing, and exited 0. A CI gate
+            # reading "No findings" over a tree that was never opened is the
+            # exact false clean this project exists to argue against, so it gets
+            # the same exit 2.
+            sys.stderr.write(
+                f"agentbound: nothing to scan under {args.path} - no "
+                f"{'/'.join(sorted(e.lstrip('.') for e in _SCAN_EXTS))} file was read\n"
+            )
+            return 2
         if args.json:
             json.dump([f.to_dict() for f in findings], sys.stdout, indent=2)
             sys.stdout.write("\n")
         else:
-            sys.stdout.write(_human(findings))
+            sys.stdout.write(_human(findings, files_read))
         # Exit 1 when a finding meets the threshold, so CI can fail a build.
         # The default is `low`, which preserves "exit 1 when findings exist"
         # for every caller that does not pass the flag.
