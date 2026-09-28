@@ -397,6 +397,55 @@ yields nothing, and a control with the gate deleted out of it fires again. A
 negative test without that control would pass just as well against a rule that
 never fires at all.
 
+## Precision on real code — 21 findings, 3 real, and the rule that changed
+
+The corpus below is mine, so it cannot tell me whether the rules survive contact
+with a codebase nobody wrote for them. The tool was therefore run against real
+agent frameworks. On `google/adk-python` the first run reported **21 production
+findings** — and **19 of them were wrong.**
+
+Every false positive was the same rule, `tool-reserved-name-shadowing`, and every
+one was a constant containing the words "tool" and "name" without reserving
+anything:
+
+| constant | what it actually is |
+|---|---|
+| `DEFAULT_GCS_TOOL_NAME_PREFIX = "gcs"` | a **prefix** — appeared in 4 files |
+| `DEFAULT_SPANNER_TOOL_NAME_PREFIX`, `DEFAULT_BIGTABLE_TOOL_NAME_PREFIX`, `DEFAULT_MONGODB_TOOL_NAME_PREFIX` | same shape |
+| `FINISH_TASK_TOOL_NAME = "finish_task"` | the name of **one** tool the module provides |
+| `_LIST_SKILLS_TOOL_NAME = "list_skills"` (six of them in `skill_toolset.py`) | a toolset's **own** tool names |
+| `RESERVED_TOOL_CALL_ERROR_TYPE = "RESERVED_TOOL_CALL"` | an **error tag** |
+
+The rule read each as a reserved-name *set* and then reported that
+`set_model_response` was "missing" from it.
+
+Two weaker readings were tried and both failed on the same real code. Excluding
+`PREFIX`/`SUFFIX`/`ERROR`/`TYPE` removed 14 of the 19. Adding a "vocabulary of two
+or more constants" test removed 3 more but still accepted `skill_toolset.py`'s six
+constants — because a constant list has a **direction**, and only the name says
+which way it points. Those six are the tools the toolset *provides*, not names it
+*protects*; the same file even tests one of them with `in selected_core_tools`.
+
+The bar is now the word `RESERVED` for the single-constant shape.
+`_RESERVED_TOOL_NAMES = frozenset({...})` is unaffected: it is a set literal whose
+members are framework-owned tool references, which is the shape with unambiguous
+evidence and the one the rule was built for.
+
+**Measured effect, with no true positive lost:**
+
+| repo | production findings before | after | what remains |
+|---|---|---|---|
+| `google/adk-python` | 21 | **3** | the real `_RESERVED_TOOL_NAMES` omission, `tool-dict-last-wins`, `confirmation-gate-fails-open` |
+| `google/adk-go` | 2 | 2 | `tool-inmodel-name-unoccupied` |
+| `google/adk-java` | 8 | 8 | `tool-inmodel-name-unoccupied` |
+| `openai/openai-agents-python` | 0 | 0 | clean |
+
+Precision on `adk-python` production code went from **0.14 to 1.00**. Four
+regression tests now use the real constant names above, so the mode cannot return
+silently. The lesson generalises past this rule, and it is recorded in the corpus
+too: **a benchmark the author wrote to prove their own detector works will not
+contain the shapes that break it.**
+
 ## Scope & honesty
 
 The rules are heuristics that surface high-signal locations and explain the

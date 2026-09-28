@@ -63,10 +63,21 @@ def test_reserved_name_shadowing_clean_when_name_reserved():
 
 # A framework may also reserve a tool name one constant at a time rather than as a
 # set; microsoft/agent-framework does. That shape was invisible to the matcher, so
-# an omission from it could never be reported. These three fixtures pin both
-# directions: the shape is now seen, and unrelated string constants are still not.
+# an omission from it could never be reported. These fixtures pin both directions:
+# the shape is now seen, and unrelated string constants are still not.
+#
+# REVISED after measuring on google/adk-python. The original fixture declared a
+# *single* `LIST_TOOLS_TOOL_NAME` constant and asserted it was read as a reserved
+# list. On real code that reading produced 19 false positives out of 21 production
+# findings, because a module naming its own one tool
+# `FINISH_TASK_TOOL_NAME = "finish_task"` looked identical to a reserved
+# vocabulary of one. The fixture now carries the shape microsoft/agent-framework
+# actually has -- two `*_TOOL_NAME` constants side by side -- which is the evidence
+# that a vocabulary exists. `test_..._ignores_lone_tool_name_constant` below pins
+# the new, deliberately narrower behaviour.
 AGENT_FRAMEWORK_CONST_OMITS_NAME = '''\
-LIST_TOOLS_TOOL_NAME = "tools/list"
+RESERVED_TOOL_NAMES_LIST = "tools/list"
+GET_TOOLS_TOOL_NAME = "get_tools"
 
 def set_model_response() -> str:
     return "ok"
@@ -88,12 +99,90 @@ def set_model_response() -> str:
     return "ok"
 '''
 
+# Real shapes from google/adk-python that the old test misread as reserved sets.
+# Each names one tool, or a *property* of a tool, and none is a protected list.
+ADK_PY_LONE_TOOL_NAME = '''\
+FINISH_TASK_TOOL_NAME = "finish_task"
+
+def set_model_response() -> str:
+    return "ok"
+'''
+
+ADK_PY_TOOL_NAME_PREFIXES = '''\
+DEFAULT_GCS_TOOL_NAME_PREFIX = "gcs"
+DEFAULT_SPANNER_TOOL_NAME_PREFIX = "spanner"
+
+def set_model_response() -> str:
+    return "ok"
+'''
+
+ADK_PY_RESERVED_ERROR_TYPE = '''\
+RESERVED_TOOL_CALL_ERROR_TYPE = "RESERVED_TOOL_CALL"
+
+def set_model_response() -> str:
+    return "ok"
+'''
+
+# google/adk-python `skill_toolset.py`: six `*_TOOL_NAME` constants. A "vocabulary
+# of two or more" test accepted this, which is why the bar is now the word
+# RESERVED -- these six are the tools the toolset *provides*, and membership
+# direction cannot be read off the shape.
+ADK_PY_TOOL_VOCABULARY = '''\
+_LIST_SKILLS_TOOL_NAME = "list_skills"
+_SEARCH_SKILLS_TOOL_NAME = "search_skills"
+_LOAD_SKILL_TOOL_NAME = "load_skill"
+_UNLOAD_SKILL_TOOL_NAME = "unload_skill"
+
+def set_model_response() -> str:
+    return "ok"
+'''
+
 
 def test_reserved_name_shadowing_sees_single_constant_declarations():
     findings = rule_tool_reserved_name_shadowing(
         {"mcp_handler.py": AGENT_FRAMEWORK_CONST_OMITS_NAME}
     )
     assert any("set_model_response" in f.message for f in findings)
+
+
+def test_reserved_name_shadowing_ignores_lone_tool_name_constant():
+    """One `*_TOOL_NAME` constant names a tool; it does not reserve a vocabulary.
+
+    Measured on google/adk-python: reading it as a reserved list produced 19 false
+    positives out of 21 production findings.
+    """
+    findings = rule_tool_reserved_name_shadowing(
+        {"_finish_task_tool.py": ADK_PY_LONE_TOOL_NAME}
+    )
+    assert findings == []
+
+
+def test_reserved_name_shadowing_ignores_tool_name_prefixes():
+    """`DEFAULT_*_TOOL_NAME_PREFIX` holds "tool" and "name" but reserves nothing."""
+    findings = rule_tool_reserved_name_shadowing(
+        {"admin_toolset.py": ADK_PY_TOOL_NAME_PREFIXES}
+    )
+    assert findings == []
+
+
+def test_reserved_name_shadowing_ignores_reserved_error_type():
+    """`RESERVED_TOOL_CALL_ERROR_TYPE` says RESERVED but is an error tag, not a set."""
+    findings = rule_tool_reserved_name_shadowing(
+        {"_reflect_retry_model_plugin.py": ADK_PY_RESERVED_ERROR_TYPE}
+    )
+    assert findings == []
+
+
+def test_reserved_name_shadowing_ignores_a_tools_own_name_vocabulary():
+    """Six `*_TOOL_NAME` constants are the tools a toolset provides, not a guard.
+
+    Measured on google/adk-python `skill_toolset.py`, which the earlier
+    "vocabulary of two or more" reading reported as a reserved list.
+    """
+    findings = rule_tool_reserved_name_shadowing(
+        {"skill_toolset.py": ADK_PY_TOOL_VOCABULARY}
+    )
+    assert findings == []
 
 
 def test_reserved_name_shadowing_clean_when_single_constant_reserves_it():

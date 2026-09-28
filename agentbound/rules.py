@@ -68,15 +68,60 @@ _PLAIN_STRING_ASSIGN_RE = re.compile(
 )
 _TOOL_SHAPED_VALUE_RE = re.compile(r"^[A-Za-z_][\w./-]*$")
 
+# An identifier that names one *property of a tool* rather than a vocabulary of
+# protected names.
+#
+# This is a measured correction, not a guess. Run against google/adk-python the
+# earlier test produced 19 false positives out of 21 production findings, and
+# every one of them was a constant of this shape: `DEFAULT_GCS_TOOL_NAME_PREFIX`,
+# `DEFAULT_SPANNER_TOOL_NAME_PREFIX`, `DEFAULT_BIGTABLE_TOOL_NAME_PREFIX`,
+# `DEFAULT_MONGODB_TOOL_NAME_PREFIX` and `RESERVED_TOOL_CALL_ERROR_TYPE`. Each
+# contains both "tool" and "name"/"reserved", so each passed the old test -- but
+# a *prefix* is not a set of protected names, and neither is an error-type tag.
+_NOT_A_NAME_SET_RE = re.compile(
+    r"(PREFIX|SUFFIX|_ERROR|ERROR_|_TYPE|_ID$|_URL|_KEY$|_VERSION|_TEMPLATE|_FORMAT)",
+    re.IGNORECASE,
+)
 
-def _looks_like_tool_name_constant(assign: str, value: str) -> bool:
-    """True for `*_TOOL_NAME = "..."` / `*_RESERVED* = "..."` shaped declarations."""
+
+def _tool_name_shaped(assign: str, value: str) -> bool:
+    """The shape test alone, without the vocabulary requirement below."""
     lowered = assign.lower()
     if "tool" not in lowered:
         return False
     if "reserved" not in lowered and "name" not in lowered:
         return False
+    if _NOT_A_NAME_SET_RE.search(assign):
+        return False
     return _TOOL_SHAPED_VALUE_RE.match(value) is not None
+
+
+def _looks_like_tool_name_constant(
+    assign: str, value: str, *, in_vocabulary: bool = False
+) -> bool:
+    """True for a constant that can stand for a reserved-name declaration.
+
+    The bar is the word `RESERVED`, and that is a measured decision rather than a
+    tidy one. Two weaker readings were tried against google/adk-python and both
+    produced false positives, because a constant list has a *direction* and only
+    the name says which way it points:
+
+    * `FINISH_TASK_TOOL_NAME = "finish_task"` -- one name, read as a vocabulary
+      of one. 19 false positives out of 21 production findings.
+    * `skill_toolset.py` declares **six** `*_TOOL_NAME` constants, so a
+      "vocabulary of two or more" test accepted it -- but those six are the tools
+      the toolset *provides*, not names it protects. Membership direction cannot
+      be read off the shape, because the same file also tests one of them with
+      `in selected_core_tools`.
+
+    `_RESERVED_TOOL_NAMES = frozenset({...})` is unaffected: it is a set literal
+    and is matched by `_RESERVED_NAME_RE`, whose members are framework-owned tool
+    references rather than strings. That is the shape with unambiguous evidence,
+    and it is the one the rule was built for.
+    """
+    if not _tool_name_shaped(assign, value):
+        return False
+    return "reserved" in assign.lower()
 
 
 def _find_reserved_sets(text: str) -> list[tuple[int, str, set[str]]]:
@@ -121,10 +166,20 @@ def _find_reserved_sets(text: str) -> list[tuple[int, str, set[str]]]:
         results.append((line, m.group("assign"), names))
 
     # Single-constant declarations, which the set matcher cannot see at all.
-    for m in _PLAIN_STRING_ASSIGN_RE.finditer(text):
-        assign = m.group("assign")
-        value = m.group("value")
-        if not _looks_like_tool_name_constant(assign, value):
+    #
+    # Two passes on purpose: a lone `*_TOOL_NAME` constant is only a *vocabulary*
+    # of reserved names if the file declares more than one of them, so the count
+    # has to be known before any of them is accepted. See
+    # `_looks_like_tool_name_constant` for the measurement behind this.
+    candidates = [
+        (m, m.group("assign"), m.group("value"))
+        for m in _PLAIN_STRING_ASSIGN_RE.finditer(text)
+        if _tool_name_shaped(m.group("assign"), m.group("value"))
+    ]
+    in_vocabulary = len(candidates) > 1
+
+    for m, assign, value in candidates:
+        if not _looks_like_tool_name_constant(assign, value, in_vocabulary=in_vocabulary):
             continue
         line = text.count("\n", 0, m.start()) + 1
         results.append((line, assign, {value}))
