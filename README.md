@@ -446,6 +446,29 @@ silently. The lesson generalises past this rule, and it is recorded in the corpu
 too: **a benchmark the author wrote to prove their own detector works will not
 contain the shapes that break it.**
 
+## The full survey, and the writing
+
+The section above is one repository and one rule. The **full survey is 14 agent
+frameworks**, and its result is less flattering and more useful: 19 findings, **four of
+them wrong, in four different mechanisms**, all four published and fixed. Precision on
+that sample went **0.79 to 1.00** with no true positive lost.
+
+- **[SURVEY.md](SURVEY.md)** — the whole thing: every framework, every finding, every
+  false positive quoted with the code that caused it, and what each fix had to change.
+
+Three write-ups, in the order the work happened:
+
+- [**Nineteen findings, four of them wrong, four different ways**](https://sushantpoudel2028.com.np/writing/nineteen-findings-four-wrong-four-ways)
+  — the survey. Three patterns matched anywhere in a file let a JSON schema generator be
+  read as a confirmation gate; a regex anchored on the `{` inside a string literal
+  spanned thirteen lines to an unrelated loop; a **CRITICAL** claim against pydantic-ai
+  missed a gate written as `(A || B) && gate`; and a dedup accumulator was mistaken for
+  a security guard. Every failure was **structural, not lexical**.
+- [**My own benchmark said 1.000. Real code said 0.14.**](https://sushantpoudel2028.com.np/writing/my-benchmark-said-1000-real-code-said-014)
+  — the 21-findings round above, and why two fixes failed before one worked.
+- [**A benchmark found a bug in my own detector**](https://sushantpoudel2028.com.np/writing/a-benchmark-found-a-bug-in-my-own-detector)
+  — what the labelled corpus was for, and the false positive it found in this scanner.
+
 ## Scope & honesty
 
 The rules are heuristics that surface high-signal locations and explain the
