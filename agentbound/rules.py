@@ -469,6 +469,16 @@ def _guarded_names(text: str) -> set[str]:
 
     The collection is looked up by scanning back a bounded window from each
     normalization call, so nesting and line breaks do not matter.
+
+    The normalization must fall INSIDE the constructor's own parentheses, and that
+    is a measured correction. Matching on proximity alone paired a dedup
+    accumulator with an unrelated `.strip()` elsewhere in the same 600 characters:
+    `microsoft/agent-framework` `_skills.py` declares
+    `seen_names: set[str] = set()` and then strips skill names a dozen lines later,
+    and the rule reported `if skill.frontmatter.name in seen_names:` — a duplicate
+    check — as a security guard. Requiring containment in the constructor body is
+    what separates `frozenset(x.strip() for x in ...)` from a `set()` that merely
+    happens to be nearby.
     """
     names: set[str] = set()
     for norm in _NORM_CALL_RE.finditer(text):
@@ -476,7 +486,23 @@ def _guarded_names(text: str) -> set[str]:
         ctors = list(re.finditer(r"\b(?:frozenset|set|tuple|list)\s*[\(\[]", window))
         if not ctors:
             continue
-        before = window[:ctors[-1].start()]
+        # The constructor must still be OPEN at the normalization call, i.e. the
+        # `.strip()` sits inside its balanced body. `window` ends where the norm
+        # call begins, so a constructor that closed before then does not contain it.
+        ctor = ctors[-1]
+        depth = 0
+        contained = True
+        for i in range(ctor.end() - 1, len(window)):
+            if window[i] in "([":
+                depth += 1
+            elif window[i] in ")]":
+                depth -= 1
+                if depth == 0:
+                    contained = False  # closed before the normalizer: unrelated
+                    break
+        if not contained:
+            continue
+        before = window[: ctor.start()]
 
         assign = re.search(r"([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*$", before)
         if assign:
@@ -717,6 +743,62 @@ def _if_arm_at(text: str, pos: int) -> str:
     return block
 
 
+def _arm_gated_by_enclosing_conjunction(
+    text: str, pos: int, needle: str, window: int = 2000
+) -> bool:
+    """True when `needle` gates `pos` through an `&&` applied to its whole group.
+
+    Splitting on `||` answers "does this arm carry the check", which is the right
+    question for the dispatcher shape it was written for. It is the wrong question
+    for the other common shape, which wraps every arm in one parenthesised group
+    and `&&`-chains the gate onto the group:
+
+        if: |
+          (
+            (github.event_name == 'issue_comment' && ...) ||
+            (github.event_name == 'issues' && ...)
+          ) && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+                 github.event.comment.author_association || ...)
+
+    Here `(A || B) && gate` gates A and B alike, but neither arm segment contains
+    `gate` — it sits after the closing paren. Splitting alone reported this as an
+    ungated issues arm, which is the critical-severity false positive this removes
+    (pydantic/pydantic-ai `.github/workflows/at-claude.yml`).
+
+    This deliberately walks the raw text rather than `_if_block_span`: that helper
+    locates the block by indentation and returns None for this file, and a fix that
+    inherits its failure would not have fixed anything.
+
+    The test is narrow. The `)` must close a group that CONTAINS the arm, and an
+    `&&` carrying the needle must follow it. A gate in a sibling arm after a `||`
+    still does not count, so the original false negative stays fixed.
+
+    Enclosing parens are walked, not just the first one. An arm is commonly wrapped
+    more than once — `( (trigger && cond) )` inside the outer OR-group — and only
+    the outermost of those is the one the gate is chained to. Stopping at the first
+    `)` that closes a group opened before the arm is what made the first version of
+    this function return False on the very file it was written for.
+    """
+    end = min(len(text), pos + window)
+    depth = 0
+    i = pos
+    while i < end:
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth > 0:
+                depth -= 1
+            else:
+                # Closes a group opened before the arm, so that group contains it.
+                tail = text[i + 1 : end]
+                if re.match(r"\s*&&", tail) and needle in tail:
+                    return True
+                depth -= 1  # keep walking outwards through enclosing groups
+        i += 1
+    return False
+
+
 def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Finding]:
     """FILE rule — generalises GoogleCloudPlatform/vertex-ai-creative-studio.
 
@@ -765,6 +847,9 @@ def rule_ci_agent_missing_author_association(path: str, text: str) -> list[Findi
             line_end = len(text)
         line_text = text[line_start:line_end]
         if "author_association" in _if_arm_at(text, m.start()):
+            continue
+        # Same gate, applied to the whole `( ... )` group rather than to the arm.
+        if _arm_gated_by_enclosing_conjunction(text, m.start(), "author_association"):
             continue
         line = text.count("\n", 0, m.start()) + 1
         findings.append(

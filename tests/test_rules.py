@@ -2196,3 +2196,46 @@ def test_guard_asymmetry_ignores_a_pattern_in_a_comment():
            '    # if req["name"] not in GUARDED:  (the old, asymmetric form)\n'
            '    return run(req)\n')
     assert rule_guard_name_normalization_asymmetry("c.py", src) == []
+
+
+# --- the enclosing-conjunction gate (pydantic/pydantic-ai at-claude.yml) ------
+#
+# The real file wraps every arm in one parenthesised group and `&&`-chains the
+# author_association check onto the GROUP, so no arm segment contains it. Splitting
+# on `||` alone reported this as an ungated issues arm -- at CRITICAL severity.
+#
+# Note the double wrapping: `( (trigger && cond) )` inside the outer OR-group. The
+# first version of the fix stopped at the first `)` that closed a group opened
+# before the arm, which is the arm's OWN wrapper, and so still returned False.
+ENCLOSING_CONJUNCTION_GATE = '''\
+name: '@claude'
+on:
+  issue_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+permissions: {}
+jobs:
+  get-pr-info:
+    permissions:
+      contents: read
+    if: |
+      (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      ) && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+        github.event.comment.author_association ||
+        github.event.review.author_association ||
+        github.event.issue.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+'''
+
+
+def test_ci_author_association_ignores_a_gate_on_the_enclosing_group():
+    """`(A || B) && gate` gates both arms; neither segment contains the gate."""
+    findings = rule_ci_agent_missing_author_association(
+        ".github/workflows/at-claude.yml", ENCLOSING_CONJUNCTION_GATE
+    )
+    assert findings == []

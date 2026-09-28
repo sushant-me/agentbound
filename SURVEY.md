@@ -21,9 +21,9 @@ It changed the answer twice.
 | `google/adk-python` | 3 | 3 | 0 |
 | `google/adk-go` | 2 | 2 | 0 |
 | `google/adk-java` | 8 | 8 | 0 |
-| `microsoft/agent-framework` | 1 | 0 | **1** |
+| `microsoft/agent-framework` | 0 | — | — |
 | `langchain-ai/langchain` | 2 | 2 | 0 |
-| `pydantic/pydantic-ai` | 1 | 0 | **1** |
+| `pydantic/pydantic-ai` | 0 | — | — |
 | `openai/openai-agents-python` | 0 | — | — |
 | `langchain-ai/langgraph` | 0 | — | — |
 | `run-llama/llama_index` | 0 | — | — |
@@ -33,8 +33,9 @@ It changed the answer twice.
 | `All-Hands-AI/OpenHands` | 0 | — | — |
 | `Significant-Gravitas/AutoGPT` | 0 | — | — |
 
-**17 production findings after the two fixes below. 15 verified true, 2 verified false.**
-(The first run of this survey reported 19; fixes in v0.1.14 removed two false ones.) Every false one was
+**15 production findings after the fixes below, and every one is verified true.**
+(The first run reported 19. v0.1.14 removed two false ones, v0.1.15 the other two.
+Precision on this sample went 15/19 = 0.79 to 15/15 = 1.00, with no true positive lost.) Every false one was
 a claim I would otherwise have made in public about somebody else's code.
 
 **How each row was verified, precisely — because "true" means different things
@@ -52,7 +53,7 @@ here:**
 
 ## The four false positives, and what they have in common
 
-### 1. `pydantic-ai` `ci-agent-missing-author-association` — CRITICAL, and wrong — *still open*
+### 1. `pydantic-ai` `ci-agent-missing-author-association` — CRITICAL, and wrong — **FIXED in v0.1.15**
 
 `.github/workflows/at-claude.yml:28`. The rule reports an `issues`-triggered
 dispatch arm with no `author_association` check. The check is there, on the **lines
@@ -80,7 +81,7 @@ belief that a confirmation predicate is being introspected. Both are in
 `generate_schema_from_serialization_mixin(cls)`, whose job is to build a **JSON
 schema** from a dataclass. Annotated types, not a security predicate.
 
-### 3. `microsoft/agent-framework` `guard-name-normalization-asymmetry` — MEDIUM — *still open*
+### 3. `microsoft/agent-framework` `guard-name-normalization-asymmetry` — MEDIUM — **FIXED in v0.1.15**
 
 `_skills.py:4860`. The rule pairs a `.strip()` with an `in` membership test. Here
 the `.strip()` is `if not name or not name.strip():` — a non-empty validation — and
@@ -179,3 +180,55 @@ filter, and the `startswith("{")` deserialization path. Neither can return silen
 **Still open, and next:** `ci-agent-missing-author-association` (evaluate the whole
 `if:` expression, not the arm's line) and `guard-name-normalization-asymmetry`
 (require the normalized set and the membership test to be the same identifier).
+
+
+---
+
+## v0.1.15 — the remaining two false positives
+
+**`ci-agent-missing-author-association` (reported CRITICAL on pydantic-ai).** The
+rule splits an `if:` on `||` and asks whether *the arm* carries the check. That is
+right for the dispatcher shape it was written for and wrong for the shape
+pydantic-ai uses, which wraps every arm in one group and chains the gate onto the
+group:
+
+```yaml
+      (
+        (github.event_name == 'issue_comment' && ...) ||
+        (github.event_name == 'issues' && ...)
+      ) && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+             github.event.comment.author_association || ...)
+```
+
+`(A || B) && gate` gates A and B alike, but no arm segment contains `gate`.
+**Fix:** if a `)` closes a group that *contains* the arm and an `&&` carrying the
+needle follows it, the arm is gated. Two things had to be right and the first
+attempt got both wrong: it depended on `_if_block_span`, which returns `None` for
+this file, and it stopped at the first enclosing `)` — which is the arm's own
+wrapper, not the gated group. It now walks the raw text and continues outwards
+through nested groups.
+
+**`guard-name-normalization-asymmetry` (reported MEDIUM on agent-framework).**
+`_guarded_names` scanned back 600 characters from *any* `.strip()` and accepted a
+`set(...)` constructor found in that window. In `_skills.py` it paired
+`seen_names: set[str] = set()` — a dedup accumulator — with a stray `.strip()` a
+dozen lines later, and reported `if skill.frontmatter.name in seen_names:` (a
+duplicate check) as a security guard.
+**Fix:** the normalization must fall *inside* the constructor's own parentheses.
+That is what separates `frozenset(x.strip() for x in ...)` from a `set()` that
+merely happens to be nearby.
+
+**Final measurement:**
+
+| | first run | v0.1.14 | v0.1.15 |
+|---|---|---|---|
+| total production findings | 19 | 17 | **15** |
+| verified true | 15 | 15 | **15** |
+| verified false | 4 | 2 | **0** |
+| precision on this sample | 0.79 | 0.88 | **1.00** |
+| tests | 129 | 139 | **140** |
+
+**No true positive was lost at any step.** `google/adk-python` still reports its 3
+(including the real gate), `langchain` still reports its 2, and `adk-go`/`adk-java`
+are unchanged. That is the check that the fixes narrowed the rules rather than
+silenced them.
