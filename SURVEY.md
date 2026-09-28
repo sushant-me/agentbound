@@ -21,7 +21,7 @@ It changed the answer twice.
 | `google/adk-python` | 3 | 3 | 0 |
 | `google/adk-go` | 2 | 2 | 0 |
 | `google/adk-java` | 8 | 8 | 0 |
-| `microsoft/agent-framework` | 3 | 0 | **3** |
+| `microsoft/agent-framework` | 1 | 0 | **1** |
 | `langchain-ai/langchain` | 2 | 2 | 0 |
 | `pydantic/pydantic-ai` | 1 | 0 | **1** |
 | `openai/openai-agents-python` | 0 | — | — |
@@ -33,7 +33,8 @@ It changed the answer twice.
 | `All-Hands-AI/OpenHands` | 0 | — | — |
 | `Significant-Gravitas/AutoGPT` | 0 | — | — |
 
-**19 production findings. 15 verified true, 4 verified false.** Every false one was
+**17 production findings after the two fixes below. 15 verified true, 2 verified false.**
+(The first run of this survey reported 19; fixes in v0.1.14 removed two false ones.) Every false one was
 a claim I would otherwise have made in public about somebody else's code.
 
 **How each row was verified, precisely — because "true" means different things
@@ -51,7 +52,7 @@ here:**
 
 ## The four false positives, and what they have in common
 
-### 1. `pydantic-ai` `ci-agent-missing-author-association` — CRITICAL, and wrong
+### 1. `pydantic-ai` `ci-agent-missing-author-association` — CRITICAL, and wrong — *still open*
 
 `.github/workflows/at-claude.yml:28`. The rule reports an `issues`-triggered
 dispatch arm with no `author_association` check. The check is there, on the **lines
@@ -72,14 +73,14 @@ one.
 **This is the same shape as the bug fixed in v0.1.13** — a rule keying on a line
 and missing the structure around it — in a different rule.
 
-### 2. `microsoft/agent-framework` `confirmation-gate-fails-open` — HIGH, twice
+### 2. `microsoft/agent-framework` `confirmation-gate-fails-open` — HIGH, twice — **FIXED in v0.1.14**
 
 `_utils.py:354` and `:733`. The rule fires on `inspect.signature(...)` in the
 belief that a confirmation predicate is being introspected. Both are in
 `generate_schema_from_serialization_mixin(cls)`, whose job is to build a **JSON
 schema** from a dataclass. Annotated types, not a security predicate.
 
-### 3. `microsoft/agent-framework` `guard-name-normalization-asymmetry` — MEDIUM
+### 3. `microsoft/agent-framework` `guard-name-normalization-asymmetry` — MEDIUM — *still open*
 
 `_skills.py:4860`. The rule pairs a `.strip()` with an `in` membership test. Here
 the `.strip()` is `if not name or not name.strip():` — a non-empty validation — and
@@ -135,3 +136,46 @@ The honest ordering, since none of this is fixed yet:
 
 Until those land, the per-rule precision is what the README should report, not one
 number for the tool.
+
+
+---
+
+## v0.1.14 — what was fixed, and how it was measured
+
+Both `confirmation-gate-fails-open` false positives came from the **same defect
+class** as the v0.1.13 fix: a rule reading locally, with no requirement that the
+things it correlates belong together.
+
+**Two causes, both confirmed in the code:**
+
+1. **Cross-function correlation.** The three patterns — `x = inspect.signature(y)`,
+   `valid = x.parameters`, and a comprehension filtering on `valid` — were matched
+   anywhere in the file. In `agent-framework` a *schema generator* called
+   `inspect.signature(cls)` and an *unrelated* dict comprehension elsewhere filtered
+   a set called `valid_params`. The rule joined them into one finding.
+   **Fix:** the three matches must now fall within `_GATE_WINDOW = 1200` characters.
+   The reference true positive spans ~110; a module spans tens of thousands.
+
+2. **A regex anchored on a string literal.** Line 733's remaining finding came from
+   `_DICT_FILTER_USING_RE`, whose pattern began `\{[^{}]*?\bfor\b…`. That matched the
+   `{` inside `input_str.strip().startswith("{")` and then spanned **thirteen lines**
+   to an unrelated `for field in common_fields:` / `if field in params:` loop. A loop
+   with a membership test is not a dict comprehension.
+   **Fix:** the `{` must now open a real comprehension — `\{\s*[A-Za-z_]\w*\s*:` — so
+   the key expression has to follow immediately.
+
+**Measured effect:**
+
+| | before v0.1.14 | after |
+|---|---|---|
+| `microsoft/agent-framework` production findings | 3 | **1** |
+| total across the 14-framework survey | 19 | **17** |
+| `google/adk-python` production findings | 3 | **3** — unchanged, the gate is still found |
+| tests | 137 | **139** |
+
+Two regression tests carry the real shapes: a schema generator beside an unrelated
+filter, and the `startswith("{")` deserialization path. Neither can return silently.
+
+**Still open, and next:** `ci-agent-missing-author-association` (evaluate the whole
+`if:` expression, not the arm's line) and `guard-name-normalization-asymmetry`
+(require the normalized set and the membership test to be the same identifier).

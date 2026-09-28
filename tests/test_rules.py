@@ -240,6 +240,64 @@ def test_confirmation_gate_fails_open_detected():
     assert any(f.rule == "confirmation-gate-fails-open" for f in findings)
 
 
+# Both fixtures below are the REAL shapes from microsoft/agent-framework that the
+# rule reported as HIGH confirmation-gate failures, twice. Neither is a gate.
+#
+# The first is a JSON-schema generator: `inspect.signature(cls)` reads a
+# dataclass's annotations to build a schema, and an unrelated dict comprehension
+# elsewhere in the file filtered a set called `valid_params`. The three patterns
+# were correlated across the whole file, so they combined into one finding.
+AGENT_FRAMEWORK_SCHEMA_GEN = '''\
+def generate_schema_from_serialization_mixin(cls):
+    """Generate JSON schema from SerializationMixin class."""
+    sig = inspect.signature(cls)
+    properties = {}
+    for param_name, param in sig.parameters.items():
+        properties[param_name] = _type_to_schema(param)
+    return {"type": "object", "properties": properties}
+
+
+def _filter_kwargs(kwargs):
+    valid_params = set(inspect.signature(handler).parameters.keys())
+    return {k: v for k, v in kwargs.items() if k in valid_params}
+'''
+
+# The second is deserialization: `inspect.signature(target_type)` reads a type's
+# fields, then a plain `for ... if field in params:` loop picks a constructor
+# keyword. The old dict-filter pattern anchored on the `{` inside the STRING
+# LITERAL `startswith("{")` and spanned thirteen lines to that loop.
+AGENT_FRAMEWORK_DESERIALIZE = '''\
+def _parse_value(target_type, input_str):
+    if input_str.strip().startswith("{"):
+        data = json.loads(input_str)
+        return target_type(**data)
+
+    common_fields = ["text", "message", "content"]
+    sig = inspect.signature(target_type)
+    params = list(sig.parameters.keys())
+    for field in common_fields:
+        if field in params:
+            return target_type(**{field: input_str})
+    return None
+'''
+
+
+def test_confirmation_gate_ignores_a_schema_generator():
+    """`inspect.signature` on a class to build a schema is not a gate."""
+    findings = rule_confirmation_gate_fails_open(
+        "_utils.py", AGENT_FRAMEWORK_SCHEMA_GEN
+    )
+    assert findings == []
+
+
+def test_confirmation_gate_ignores_deserialization_field_lookup():
+    """A `for ... if field in params` loop is not a dict comprehension."""
+    findings = rule_confirmation_gate_fails_open(
+        "_utils.py", AGENT_FRAMEWORK_DESERIALIZE
+    )
+    assert findings == []
+
+
 # --- rule 2: CI dispatch missing author_association -------------------------
 
 GEMINI_DISPATCH_YML = '''\

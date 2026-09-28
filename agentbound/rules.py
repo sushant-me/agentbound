@@ -267,6 +267,11 @@ def rule_tool_reserved_name_shadowing(files: dict[str, str]) -> list[Finding]:
 _SIG_ASSIGN_RE = re.compile(
     r"\b(?P<var>[A-Za-z_]\w*)\s*=\s*inspect\.signature\(\s*(?P<arg>[A-Za-z_]\w*)\s*\)"
 )
+
+# How close together the three confirmation-gate matches must be, in characters,
+# for them to be read as one defect. The reference case spans ~110; a whole module
+# spans tens of thousands. See `rule_confirmation_gate_fails_open`.
+_GATE_WINDOW = 1200
 # The parameters are often wrapped in a call - `set(signature.parameters.keys())`
 # in the code this rule generalises - so one wrapping call is allowed before the
 # attribute.
@@ -275,7 +280,18 @@ _PARAMS_FROM_SIG_RE = re.compile(
     r"(?P<sigvar>[A-Za-z_]\w*)\.parameters\b"
 )
 _DICT_FILTER_USING_RE = re.compile(
-    r"\{[^{}]*?\bfor\b[^{}]*?\bif\s+[A-Za-z_]\w*\s+in\s+(?P<valid>[A-Za-z_]\w*)"
+    # The `{` must open a real dict comprehension, so the key expression has to
+    # follow it immediately: `{k: v for ...`.
+    #
+    # The earlier version was `\{[^{}]*?\bfor\b...`, which anchored on ANY `{`.
+    # Measured on microsoft/agent-framework that produced a false positive: the
+    # `{` inside the string literal `startswith("{")` opened the match, which then
+    # spanned thirteen lines to an unrelated `for field in common_fields:` /
+    # `if field in params:` loop, and the pair was reported as a confirmation gate.
+    # A loop with a membership test is not a comprehension; requiring the
+    # key-colon shape excludes it.
+    r"\{\s*[A-Za-z_]\w*\s*:[^{}]*?\bfor\b[^{}]*?\bif\s+"
+    r"[A-Za-z_]\w*\s+in\s+(?P<valid>[A-Za-z_]\w*)"
 )
 
 
@@ -293,19 +309,48 @@ def rule_confirmation_gate_fails_open(path: str, text: str) -> list[Finding]:
     if "inspect.signature(" not in text:
         return findings
 
-    # Which names hold a `.parameters`, per signature variable.
-    params_by_sigvar: dict[str, set[str]] = {}
+    # Which names hold a `.parameters`, per signature variable. Positions are
+    # kept because the three matches must belong to the same piece of code.
+    params_by_sigvar: dict[str, set[tuple[str, int]]] = {}
     for pm in _PARAMS_FROM_SIG_RE.finditer(text):
-        params_by_sigvar.setdefault(pm.group("sigvar"), set()).add(pm.group("valid"))
+        params_by_sigvar.setdefault(pm.group("sigvar"), set()).add(
+            (pm.group("valid"), pm.start())
+        )
 
-    # Which names a dict comprehension filters on.
-    filtered_on = {fm.group("valid") for fm in _DICT_FILTER_USING_RE.finditer(text)}
+    # Which names a dict comprehension filters on, and where.
+    filtered_on: dict[str, list[int]] = {}
+    for fm in _DICT_FILTER_USING_RE.finditer(text):
+        filtered_on.setdefault(fm.group("valid"), []).append(fm.start())
 
     for m in _SIG_ASSIGN_RE.finditer(text):
         # Skip when the inspected object is a fixed class/module (e.g.
         # inspect.signature(SomeClass)); only flag when it is a callable
         # parameter such as `target` / `predicate`.
-        if not (params_by_sigvar.get(m.group("var"), set()) & filtered_on):
+        #
+        # PROXIMITY IS REQUIRED — a measured correction. These three patterns were
+        # previously correlated across the whole file, so a JSON schema generator
+        # and an unrelated dict comprehension in different functions combined into
+        # one finding. That is what produced two HIGH false positives in
+        # microsoft/agent-framework: `generate_schema_from_serialization_mixin`
+        # calls `inspect.signature(cls)` to build a schema, and the rule called it a
+        # confirmation gate because *somewhere else in the same file* a
+        # `valid_params` set was filtered by a comprehension.
+        #
+        # The real defect is local: the predicate is introspected and the arguments
+        # filtered a few lines later. In the reference case (google/adk-python
+        # `_prepare_callable_args`) the three matches sit within ~110 characters.
+        # `_GATE_WINDOW` is far larger than that and far smaller than a module.
+        hit = False
+        for valid, ppos in params_by_sigvar.get(m.group("var"), set()):
+            if abs(ppos - m.start()) > _GATE_WINDOW:
+                continue
+            if any(
+                abs(fpos - m.start()) <= _GATE_WINDOW
+                for fpos in filtered_on.get(valid, ())
+            ):
+                hit = True
+                break
+        if not hit:
             continue
         line = text.count("\n", 0, m.start()) + 1
         findings.append(
