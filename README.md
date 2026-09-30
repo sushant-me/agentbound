@@ -343,12 +343,16 @@ number is not the objective.
 vulnerability.** Everything above reads the *permissions block*. But the question
 that decides the outcome is what the agent's `--allowedTools` patterns are bounded
 to, and a `Bash(...)` entry is a command **prefix** — the grant ends at Claude
-Code's `:*` wildcard, so whatever precedes it is the bound:
+Code's `:*` wildcard, so whatever precedes it **narrows the command but does not bound the
+target**: `:*` permits any later argument, including one that changes what the command acts
+on. A prefix is a scope, not a limit:
 
 ```
 Bash(gh issue edit:*)                      the agent may edit any issue
-Bash(gh issue edit 1234:*)                 bounded to that issue
-Bash(gh issue edit ${{ ...number }}:*)     bounded to the input
+Bash(gh issue edit 1234:*)                 the prefix names issue 1234 -- but `--repo other/repo`
+                                           is a later argument and redirects it, so this is NOT a
+                                           bound on the target
+Bash(gh issue edit ${{ ...number }}:*)     the prefix names the input -- same qualification
 ```
 
 The rule now distinguishes these, and the corpus validated it in **both
