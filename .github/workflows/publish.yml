@@ -14,8 +14,10 @@ name: Publish
 #     Workflow name     : publish.yml
 #     Environment name  : pypi
 #
-# After that, publishing a GitHub release publishes the package. Until then this job fails
-# on the upload step and nothing else is affected.
+# After that, publishing a GitHub release publishes the package. Until then the job builds
+# the distributions, skips the upload, and writes the setup steps above to the job summary -
+# a red run on every release would say nothing about this repository's code. Set the
+# repository variable PYPI_PUBLISH to `true` once the pending publisher exists.
 
 on:
   release:
