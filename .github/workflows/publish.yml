@@ -55,8 +55,36 @@ jobs:
     permissions:
       id-token: write   # the OIDC token the trusted publisher exchanges
     steps:
+      # Publishing is opt-in until this project has a PyPI trusted publisher. Without one,
+      # the upload step fails with `invalid-publisher` on every release: a red run that says
+      # nothing about this repository's code and that nothing in this repository can fix.
+      # The setup is one page - pypi.org -> Your account -> Publishing - so the gate states
+      # it instead of leaving a permanent red X on every release.
+      - name: Is publishing enabled for this repository?
+        id: gate
+        env:
+          ENABLED: ${{ vars.PYPI_PUBLISH }}
+        run: |
+          if [ "$ENABLED" = "true" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "publishing enabled (PYPI_PUBLISH=true)"
+            exit 0
+          fi
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### PyPI publishing is not enabled"
+            echo ""
+            echo "The distributions were built and are attached to this run; nothing was uploaded."
+            echo ""
+            echo "To enable it: add a pending publisher at pypi.org -> Your account -> Publishing"
+            echo "(owner sushant-me, repository agentbound, workflow publish.yml, environment pypi),"
+            echo "then set the repository variable PYPI_PUBLISH to true."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::PyPI publishing is disabled for this repository (set PYPI_PUBLISH=true once a trusted publisher exists)."
       - uses: actions/download-artifact@v4
+        if: steps.gate.outputs.ready == 'true'
         with:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        if: steps.gate.outputs.ready == 'true'
