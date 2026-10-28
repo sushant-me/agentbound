@@ -58,6 +58,14 @@ docstrings).
 
 ## Install & run
 
+Install the released version:
+
+```bash
+pip install "git+https://github.com/sushant-me/agentbound.git@v0.1.15"
+```
+
+Or work from a clone (`pip install -e .`) - the commands below use files from this repository.
+
 ```bash
 pip install -e .
 agentbound scan /path/to/repo
