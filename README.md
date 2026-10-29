@@ -458,9 +458,9 @@ silently. The lesson generalises past this rule, and it is recorded in the corpu
 too: **a benchmark the author wrote to prove their own detector works will not
 contain the shapes that break it.**
 
-**One false positive is kept rather than fixed, and it is worth naming.** Scanning
-five more agent frameworks (`openai-agents-python`, `pydantic-ai`, `crewAI`,
-`smolagents`, `agno`) found one finding, and it is wrong: agno's
+**One false positive is kept rather than fixed, and it is worth naming.** Scanning five
+more repositories — three already in the survey, two new (`huggingface/smolagents`,
+`agno-agi/agno`) — found one finding, and it is wrong: agno's
 `filter_hook_args(hook, all_args)` introspects the hook, keeps the parameters it
 accepts, and *returns* the filtered dict so the caller can invoke the hook with it.
 That is the same three-line shape as the reference case this rule was written for
@@ -468,8 +468,9 @@ That is the same three-line shape as the reference case this rule was written fo
 see the caller. Requiring the filtered dict to be invoked locally would drop the
 reference case itself; carving out names like `hook` is the hardcoding this rule was
 rewritten to avoid. The limitation is written into the rule's docstring instead, so the
-next reader meets it as a known cost rather than a surprise. The other four frameworks
-scanned clean.
+next reader meets it as a known cost rather than a surprise. The other four repositories
+scanned clean, and [SURVEY.md](SURVEY.md) reports the extension — 16 frameworks scanned,
+precision **0.94**, with the 14-framework figures left as the dated measurement they were.
 
 ## The full survey, and the writing
 

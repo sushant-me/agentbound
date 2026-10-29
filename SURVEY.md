@@ -232,3 +232,52 @@ merely happens to be nearby.
 (including the real gate), `langchain` still reports its 2, and `adk-go`/`adk-java`
 are unchanged. That is the check that the fixes narrowed the rules rather than
 silenced them.
+
+## Extension: two more frameworks, and one false positive kept (v0.1.16)
+
+The survey above is a dated measurement of 14 frameworks. Two more were scanned on
+2026-10-29 with v0.1.16 — chosen because they are widely used and were not in the
+original set — and they are reported here rather than left out, because a survey that
+only grows when the news is good is not a measurement.
+
+| framework | production findings | verified true | verified false |
+|---|---|---|---|
+| `huggingface/smolagents` | 0 | — | — |
+| `agno-agi/agno` | 1 | 0 | **1** |
+
+The agno finding is `confirmation-gate-fails-open` against
+`libs/agno/agno/utils/hooks.py`, and it is wrong. `filter_hook_args(hook, all_args)`
+introspects the hook, keeps the parameters it accepts, and **returns** the filtered
+dict so the caller can invoke the hook with it:
+
+```python
+sig = inspect.signature(hook)
+accepted_params = set(sig.parameters.keys())
+filtered_args = {key: value for key, value in all_args.items() if key in accepted_params}
+return filtered_args
+```
+
+That is the same three-line shape as the reference case this rule was written for —
+`_prepare_callable_args` in `adk-python` also returns its filtered dict — and a
+per-file rule cannot see who calls it. A guard requiring the filtered dict to be
+invoked locally (`predicate(**filtered)`) was written and measured: it clears agno and
+**silences the reference case**, trading a false positive for a false negative on the
+shape the rule exists for. It was reverted. Excluding names like `hook` is the
+hardcoding the rule was rewritten to remove.
+
+So the false positive is kept, and written into the rule's docstring. The cost is
+visible in the number rather than hidden in a footnote:
+
+| | 14-framework survey | + 2 frameworks (v0.1.16) |
+|---|---|---|
+| frameworks scanned | 14 | **16** |
+| total findings | 15 | 16 |
+| verified true | 15 | 15 |
+| verified false | 0 | **1** |
+| precision | **1.00** | **0.94** |
+
+The 14-framework figures above are unchanged: they measured what they measured, on the
+builds named. What this says is narrower and more useful than "precision 1.00" — that
+the fifth false-positive mechanism is a *shape a static per-file rule cannot separate
+from the defect*, which is a statement about the technique, not about agno's code. No
+upstream issue was filed for it: there is no bug in agno to report.
