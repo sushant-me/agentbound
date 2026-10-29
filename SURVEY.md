@@ -7,7 +7,7 @@ graded. A finding that is not verified in the file is not a finding.*
 
 ## Why this exists
 
-The corpus in `tool-boundary-corpus` is 23 labelled cases and the README reports
+The corpus in `tool-boundary-corpus` is 24 labelled cases and the README reports
 precision 1.000 against it. **I wrote that corpus**, so it contains the mistakes I
 had already thought of. This is the opposite kind of input: repositories written by
 other people, for other reasons, with no knowledge that a detector would read them.

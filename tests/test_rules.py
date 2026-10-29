@@ -358,6 +358,30 @@ def test_tool_dict_last_wins_detected():
     assert any(f.rule == "tool-dict-last-wins" for f in findings)
 
 
+# The same bug reported without a logger: a print to stderr is a diagnostic that is still
+# only a report. Written because agentbound found nothing in agent-review-sample, where the
+# duplicate is warned about with print(..., file=sys.stderr) and then assigned anyway -
+# a false negative the sample caught in the detector rather than the other way round.
+STDERR_PRINT_LAST_WINS = '''\
+def register(self, tool, plugin=False):
+    if plugin and tool.name in BUILTIN_TOOLS:
+        print(f"warning: duplicate tool name {tool.name!r} ignored", file=sys.stderr)
+    self._tools[tool.name] = tool
+'''
+
+
+def test_tool_dict_last_wins_detected_for_stderr_print():
+    findings = rule_tool_dict_last_wins("vulnerable_agent/agent.py", STDERR_PRINT_LAST_WINS)
+    assert any(f.rule == "tool-dict-last-wins" for f in findings)
+
+
+def test_tool_dict_last_wins_clean_when_the_print_goes_to_stdout():
+    # Ordinary program output, not a diagnostic about the duplicate.
+    stdout_variant = STDERR_PRINT_LAST_WINS.replace(", file=sys.stderr", "")
+    findings = rule_tool_dict_last_wins("vulnerable_agent/agent.py", stdout_variant)
+    assert findings == []
+
+
 def test_tool_dict_last_wins_clean_without_duplicate_warning():
     clean = LLM_REQUEST_LAST_WINS.replace('logging.warning(\n            "Duplicate', 'logging.info(\n            "Registered')
     findings = rule_tool_dict_last_wins("llm_request.py", clean)

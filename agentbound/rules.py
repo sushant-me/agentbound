@@ -406,10 +406,17 @@ _WARN_IDENT_RE = re.compile(r"(?:self\.)?(?P<recv>[A-Za-z_]\w*)\.warning\(\s*(?P
 
 
 def _warns_about_duplicates(text: str) -> bool:
-    """Whether the file reports a duplicate through a logger.
+    """Whether the file reports a duplicate without guarding on it.
 
     Receiver names are classified, not enumerated: `logging`, a name bound to
     `logging.getLogger(...)`, or any name ending in `logger` in any case.
+
+    A report is not only a logger call. The review sample reports the duplicate with
+    `print(f"warning: duplicate tool name {name!r} ignored", file=sys.stderr)` and then
+    assigns unconditionally - the same "reported, not guarded" shape this rule is about,
+    and the rule returned nothing for it because only loggers counted. A print to
+    **stderr** whose line names the duplicate is therefore accepted too; a print to
+    stdout is not, because that is ordinary program output, not a diagnostic.
     """
     bound = {"logging"}
     bound.update(m.group("name") for m in _LOGGER_BINDING_RE.finditer(text))
@@ -428,6 +435,14 @@ def _warns_about_duplicates(text: str) -> bool:
         if "duplicate" not in consts.get(m.group("name"), "").lower():
             continue
         if is_logger(m.group("recv")):
+            return True
+    # `print(..., file=sys.stderr)` - a diagnostic that is still only a report.
+    for line in text.splitlines():
+        if "print(" not in line or "sys.stderr" not in line:
+            continue
+        if "duplicate" in line.lower():
+            return True
+        if any(name in line and "duplicate" in val.lower() for name, val in consts.items()):
             return True
     return False
 
@@ -606,8 +621,8 @@ def rule_tool_dict_last_wins(path: str, text: str) -> list[Finding]:
                 line=line,
                 message=(
                     f"tool dict '{m.group('dict')}' assigned unconditionally on "
-                    f"a name key; duplicates are only logged (logging.warning), "
-                    "so a later tool silently shadows an earlier one (last-wins)"
+                    f"a name key; duplicates are only reported (logged, or printed to "
+                    "stderr), so a later tool silently shadows an earlier one (last-wins)"
                 ),
             )
         )
