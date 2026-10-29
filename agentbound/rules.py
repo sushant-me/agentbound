@@ -302,6 +302,18 @@ def rule_confirmation_gate_fails_open(path: str, text: str) -> list[Finding]:
     arguments (`inspect.signature(target)` + `if k in valid_params`), so a
     generic predicate is called with its defaults and returns `False`, opening
     the gate. `FunctionTool` filters by the *tool's* signature and fails closed.
+
+    KNOWN FALSE POSITIVE, measured rather than assumed: a generic argument
+    dispatcher has exactly this shape and no gate. agno's
+    `filter_hook_args(hook, all_args)` introspects the hook, keeps the parameters
+    it accepts, and *returns* the filtered dict for the caller to invoke the hook
+    with - which is the same three-line shape as the reference case
+    (`_prepare_callable_args` also returns its filtered dict). A per-file rule
+    cannot see the caller, so no structural guard separates them: requiring the
+    filtered dict to be called locally would drop the reference case itself, and
+    carving out names like `hook` is the hardcoding this rule was rewritten to
+    avoid. Reported as a finding in agno; kept, and written down here, rather
+    than traded for a false negative on the case the rule exists for.
     """
     findings: list[Finding] = []
     if not path.endswith(".py"):
